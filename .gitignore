@@ -1,0 +1,11 @@
+# .NET build output
+bin/
+obj/
+publish/
+*.user
+.vs/
+
+# Conversion outputs (keep the sample CSV, ignore generated tracks)
+*.gpx
+*.fit
+!samples/**/*.gpx
