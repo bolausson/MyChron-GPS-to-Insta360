@@ -5,6 +5,9 @@ publish/
 *.user
 .vs/
 
+# Editor / workspace files
+*.code-workspace
+
 # Conversion outputs (keep the sample CSV, ignore generated tracks)
 *.gpx
 *.fit
