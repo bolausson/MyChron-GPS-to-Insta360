@@ -21,8 +21,8 @@ internal static class Program
             return Cli.Run(args);
         }
 
-        // GUI mode. A bare path (CSV dragged onto the .exe) preloads the form.
-        string? preload = args.FirstOrDefault(File.Exists);
+        // GUI mode. Bare paths (folders/CSVs dragged onto the .exe — one or several) preload the list.
+        string[] preload = args.Where(a => File.Exists(a) || Directory.Exists(a)).ToArray();
 
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);

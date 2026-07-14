@@ -4,21 +4,24 @@ namespace MyChron2Insta360.Core;
 
 /// <summary>
 /// Writes a minimal but valid Garmin FIT Activity file (file_id -> records -> lap -> session ->
-/// activity). Positions are semicircles; speed (m/s), altitude (m) and distance (m) are passed in
-/// real units and scaled by the SDK. Timestamps must be UTC — Insta360 syncs by absolute time.
+/// activity). Records from all session segments are written in time order; cumulative distance is
+/// summed within each segment only (the stopped gap between sessions is not counted as travel).
+/// Positions are semicircles; speed (m/s) and altitude (m) are passed in real units and scaled by
+/// the SDK. Timestamps must be UTC — Insta360 syncs by absolute time.
 /// </summary>
 public static class FitWriter
 {
     private const double SemicirclesPerDegree = 2147483648.0 / 180.0; // 2^31 / 180
 
-    public static void Write(string path, IReadOnlyList<TrackPoint> points, string sessionName)
+    public static void Write(string path, IReadOnlyList<IReadOnlyList<TrackPoint>> segments, string sessionName)
     {
         var encoder = new Encode(ProtocolVersion.V20);
         using var fs = new FileStream(path, FileMode.Create, FileAccess.ReadWrite, FileShare.Read);
         encoder.Open(fs);
 
-        System.DateTime startUtc = points.Count > 0 ? Utc(points[0].Utc) : System.DateTime.UtcNow;
-        System.DateTime endUtc = points.Count > 0 ? Utc(points[^1].Utc) : startUtc;
+        var all = segments.SelectMany(s => s).OrderBy(p => p.Utc).ToList();
+        System.DateTime startUtc = all.Count > 0 ? Utc(all[0].Utc) : System.DateTime.UtcNow;
+        System.DateTime endUtc = all.Count > 0 ? Utc(all[^1].Utc) : startUtc;
 
         // file_id — must be the first message.
         var fileId = new FileIdMesg();
@@ -29,31 +32,32 @@ public static class FitWriter
         fileId.SetTimeCreated(new Dynastream.Fit.DateTime(startUtc));
         encoder.Write(fileId);
 
-        // record messages — one GPS point each.
+        // record messages — distance accumulates within a segment, resets across the stopped gap.
         double distanceM = 0;
-        TrackPoint? prev = null;
         bool haveStart = false;
         int startLatSc = 0, startLonSc = 0;
-        foreach (var p in points)
+        foreach (var seg in segments)
         {
-            if (prev is not null) distanceM += Haversine(prev.Lat, prev.Lon, p.Lat, p.Lon);
+            TrackPoint? prev = null;
+            foreach (var p in seg)
+            {
+                if (prev is not null) distanceM += Haversine(prev.Lat, prev.Lon, p.Lat, p.Lon);
+                var r = new RecordMesg();
+                r.SetTimestamp(new Dynastream.Fit.DateTime(Utc(p.Utc)));
+                r.SetPositionLat(Semicircles(p.Lat));
+                r.SetPositionLong(Semicircles(p.Lon));
+                if (p.EleM is double ele) r.SetAltitude((float)ele);
+                if (p.SpeedMs is double spd) r.SetSpeed((float)spd);
+                r.SetDistance((float)distanceM);
+                encoder.Write(r);
 
-            var r = new RecordMesg();
-            r.SetTimestamp(new Dynastream.Fit.DateTime(Utc(p.Utc)));
-            r.SetPositionLat(Semicircles(p.Lat));
-            r.SetPositionLong(Semicircles(p.Lon));
-            if (p.EleM is double ele) r.SetAltitude((float)ele);
-            if (p.SpeedMs is double spd) r.SetSpeed((float)spd);
-            r.SetDistance((float)distanceM);
-            encoder.Write(r);
-
-            if (!haveStart) { startLatSc = Semicircles(p.Lat); startLonSc = Semicircles(p.Lon); haveStart = true; }
-            prev = p;
+                if (!haveStart) { startLatSc = Semicircles(p.Lat); startLonSc = Semicircles(p.Lon); haveStart = true; }
+                prev = p;
+            }
         }
 
         float elapsed = (float)(endUtc - startUtc).TotalSeconds;
 
-        // lap (summary).
         var lap = new LapMesg();
         lap.SetMessageIndex(0);
         lap.SetTimestamp(new Dynastream.Fit.DateTime(endUtc));
@@ -66,7 +70,6 @@ public static class FitWriter
         lap.SetEventType(EventType.Stop);
         encoder.Write(lap);
 
-        // session (summary).
         var session = new SessionMesg();
         session.SetMessageIndex(0);
         session.SetTimestamp(new Dynastream.Fit.DateTime(endUtc));
@@ -84,7 +87,6 @@ public static class FitWriter
         session.SetTrigger(SessionTrigger.ActivityEnd);
         encoder.Write(session);
 
-        // activity (summary) — must be last.
         var activity = new ActivityMesg();
         activity.SetTimestamp(new Dynastream.Fit.DateTime(endUtc));
         activity.SetTotalTimerTime(elapsed);

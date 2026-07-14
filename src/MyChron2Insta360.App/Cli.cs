@@ -14,10 +14,11 @@ internal static class Cli
             if (args.Any(a => a is "-h" or "--help")) { PrintHelp(); return 0; }
             if (args.Any(a => a == "--version")) { Console.WriteLine($"MyChron2Insta360 {AppInfo.Version}"); return 0; }
 
-            string? input = null, output = null, tz = null, format = "gpx";
-            double? utcOffsetHours = null, nudge = null, hz = null;
-            int minSat = 0;
-            bool trim = false, forceLocal = false;
+            var inputs = new List<string>();
+            string? output = null, outDir = null, format = "gpx", dateStr = null;
+            double? nudge = null, hz = null, maxAcc = null;
+            int? leap = null;
+            bool trim = false, gps10 = false, merge = false;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -26,56 +27,73 @@ internal static class Cli
                 switch (a)
                 {
                     case "-o": case "--out": output = Next(); break;
+                    case "--out-dir": outDir = Next(); break;
                     case "--format": format = (Next() ?? "gpx").ToLowerInvariant(); break;
                     case "--fit": format = "fit"; break;
                     case "--both": format = "both"; break;
-                    case "--tz": tz = Next(); break;
-                    case "--utc-offset": utcOffsetHours = ParseD(Next()); break;
-                    case "--local": forceLocal = true; break;
-                    case "--nudge": nudge = ParseD(Next()); break;
+                    case "--merge": merge = true; break;
+                    case "--gps10": gps10 = true; break;
                     case "--hz": hz = ParseD(Next()); break;
-                    case "--min-sat": minSat = (int)(ParseD(Next()) ?? 0); break;
+                    case "--nudge": nudge = ParseD(Next()); break;
+                    case "--max-accuracy": maxAcc = ParseD(Next()); break;
+                    case "--date": dateStr = Next(); break;
+                    case "--leap": leap = (int?)ParseD(Next()); break;
                     case "--trim": trim = true; break;
                     case "--nogui": break;
                     default:
-                        if (a.Length > 0 && a[0] != '-' && input is null) input = a;
+                        if (a.Length > 0 && a[0] != '-') inputs.Add(a);
                         break;
                 }
             }
 
-            if (input is null) { Console.Error.WriteLine("Error: no input CSV specified.\n"); PrintHelp(); return 2; }
-            if (!File.Exists(input)) { Console.Error.WriteLine($"Error: file not found: {input}"); return 2; }
-            if (format is not ("gpx" or "fit" or "both"))
-            { Console.Error.WriteLine($"Error: --format must be gpx, fit or both (got '{format}')."); return 2; }
+            if (inputs.Count == 0) { Console.Error.WriteLine("Error: no input (a RaceStudio _CSV folder, a parent folder, or _GPS*.csv).\n"); PrintHelp(); return 2; }
+            foreach (var inp in inputs)
+                if (!File.Exists(inp) && !Directory.Exists(inp)) { Console.Error.WriteLine($"Error: input not found: {inp}"); return 2; }
+            if (format is not ("gpx" or "fit" or "both")) { Console.Error.WriteLine($"Error: --format must be gpx, fit or both (got '{format}')."); return 2; }
 
-            bool usingAuto = utcOffsetHours is null && string.IsNullOrWhiteSpace(tz) && !forceLocal;
-
-            var opt = new ConversionOptions { MinSatellites = minSat, TrimStandstill = trim };
-            if (utcOffsetHours is double oh) opt.FixedUtcOffset = TimeSpan.FromHours(oh);
-            else if (!string.IsNullOrWhiteSpace(tz)) opt.SessionTimeZone = ResolveTz(tz!);
-            else if (forceLocal) opt.AutoTimeZone = false;
+            var opt = new ConversionOptions { TrimStandstill = trim };
             if (nudge is double ms) opt.ManualOffsetSeconds = ms;
             if (hz is double h) opt.TargetHz = h;
-
-            Console.WriteLine($"Parsing {input} ...");
-            var data = AimCsvParser.Parse(input);
-            Console.WriteLine($"  {data.Rows.Count} rows, {data.Channels.Count} channels, {data.SampleRateHz:0.#} Hz logging rate.");
-
-            var pts = TrackBuilder.Build(data, opt);
-            Console.WriteLine($"  Timezone: {DescribeZone(opt, usingAuto)}");
-            Console.WriteLine($"  Output rate: {DescribeRate(opt)}");
-            Console.WriteLine($"  {pts.Count} track points.");
-            if (pts.Count > 0)
-                Console.WriteLine($"  UTC span: {pts[0].Utc:yyyy-MM-dd HH:mm:ss}Z .. {pts[^1].Utc:HH:mm:ss}Z");
-            else
-                Console.Error.WriteLine("  WARNING: no valid GPS points produced. Check channels / satellite filter.");
-
-            string name = data.GetMeta("Session") ?? Path.GetFileNameWithoutExtension(input);
-            foreach (var (path, isFit) in OutputPaths(input, output, format))
+            if (maxAcc is double ma) opt.MaxAccuracyM = ma;
+            if (leap is int lp) opt.LeapSeconds = lp;
+            if (!string.IsNullOrWhiteSpace(dateStr))
             {
-                if (isFit) FitWriter.Write(path, pts, name);
-                else GpxWriter.Write(path, pts, name);
-                Console.WriteLine($"Wrote {path}");
+                if (!DateTime.TryParseExact(dateStr, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var d))
+                { Console.Error.WriteLine("Error: --date must be YYYY-MM-DD."); return 2; }
+                opt.DateOverrideUtc = DateTime.SpecifyKind(d, DateTimeKind.Utc);
+            }
+
+            var sessions = RaceStudioGpsCsv.LoadAll(inputs, gps10);
+            Console.WriteLine($"Found {sessions.Count} session(s):");
+            foreach (var s in sessions)
+                Console.WriteLine($"  {DirName(Path.GetDirectoryName(s.SourceFile)!)}  ({s.Samples.Count} fixes, {s.NativeHz:0.#} Hz)");
+            if (outDir is not null) Directory.CreateDirectory(outDir);
+
+            if (merge && sessions.Count > 1)
+            {
+                Console.WriteLine("Mode: MERGE → one output file.");
+                var segs = TrackBuilder.Build(sessions, opt);
+                ReportBuild(opt);
+                string primary = inputs[0];
+                string baseName = MergedBaseName(opt);
+                string dir = outDir ?? (Directory.Exists(primary) ? primary : Path.GetDirectoryName(sessions[0].SourceFile)!);
+                string name = $"{baseName} ({sessions.Count} sessions)";
+                WriteJob(segs, output ?? Path.Combine(dir, baseName), name, format);
+            }
+            else
+            {
+                if (sessions.Count > 1) Console.WriteLine("Mode: individual → one output file per session (use --merge to combine).");
+                foreach (var s in sessions)
+                {
+                    var segs = TrackBuilder.Build(new[] { s }, opt);
+                    string folder = Path.GetDirectoryName(s.SourceFile)!;
+                    string baseName = DirName(folder);
+                    string dir = outDir ?? folder;
+                    string basePath = (output is not null && sessions.Count == 1) ? output : Path.Combine(dir, baseName);
+                    Console.WriteLine($"[{baseName}] {opt.TotalPoints} pts @ {opt.EffectiveHz:0.#} Hz" +
+                                      (opt.StartUtc is DateTime t0 ? $"  {t0:HH:mm:ss}Z.." + (opt.EndUtc is DateTime t1 ? $"{t1:HH:mm:ss}Z" : "") : ""));
+                    WriteJob(segs, basePath, s.Name, format);
+                }
             }
             return 0;
         }
@@ -86,61 +104,71 @@ internal static class Cli
         }
     }
 
-    private static string DescribeRate(ConversionOptions opt)
+    private static void ReportBuild(ConversionOptions opt)
     {
-        string detected = opt.DetectedGpsHz is double d ? $"detected GPS {d:0.#} Hz" : "GPS rate not detected";
-        return opt.TargetHz > 0
-            ? $"{opt.EffectiveHz:0.#} Hz (manual — {detected})"
-            : $"{opt.EffectiveHz:0.#} Hz (auto — matched to {detected})";
+        Console.WriteLine($"  {opt.TotalPoints} points from {opt.SessionCount} session(s).");
+        Console.WriteLine($"  Time base: {(opt.UsedItow ? "iTOW (exact GPS time)" : "relative (no iTOW — sync will need a nudge)")}");
+        Console.WriteLine($"  Output rate: {(opt.TargetHz > 0 ? $"{opt.EffectiveHz:0.#} Hz (downsampled)" : $"{opt.EffectiveHz:0.#} Hz (native)")}");
+        if (opt.StartUtc is DateTime a0 && opt.EndUtc is DateTime a1)
+            Console.WriteLine($"  UTC span: {a0:yyyy-MM-dd HH:mm:ss}Z .. {a1:HH:mm:ss}Z");
     }
 
-    private static string DescribeZone(ConversionOptions opt, bool usingAuto)
+    private static void WriteJob(List<List<TrackPoint>> segments, string basePath, string trackName, string format)
     {
-        if (opt.FixedUtcOffset is TimeSpan o)
-            return $"UTC{(o < TimeSpan.Zero ? "-" : "+")}{Math.Abs(o.TotalHours):0.##}";
-        if (opt.SessionTimeZone is TimeZoneInfo z)
-            return z.Id + (usingAuto ? " (auto-detected from GPS)" : "");
-        return TimeZoneInfo.Local.Id + (usingAuto ? " (auto-detect failed — using machine local)" : "");
+        foreach (var (path, isFit) in FormatPaths(basePath, format))
+        {
+            if (isFit) FitWriter.Write(path, segments, trackName);
+            else GpxWriter.Write(path, segments, trackName);
+            Console.WriteLine($"Wrote {path}");
+        }
     }
 
-    private static IEnumerable<(string path, bool isFit)> OutputPaths(string input, string? output, string format)
+    private static IEnumerable<(string path, bool isFit)> FormatPaths(string basePath, string format)
     {
-        if (format == "gpx") { yield return (output ?? Path.ChangeExtension(input, ".gpx"), false); yield break; }
-        if (format == "fit") { yield return (output ?? Path.ChangeExtension(input, ".fit"), true); yield break; }
-        string base_ = output ?? input; // both: derive .gpx and .fit from the same base
-        yield return (Path.ChangeExtension(base_, ".gpx"), false);
-        yield return (Path.ChangeExtension(base_, ".fit"), true);
+        if (format == "gpx") { yield return (Ext(basePath, ".gpx"), false); yield break; }
+        if (format == "fit") { yield return (Ext(basePath, ".fit"), true); yield break; }
+        yield return (Ext(basePath, ".gpx"), false);
+        yield return (Ext(basePath, ".fit"), true);
     }
+
+    private static string DirName(string path) =>
+        new DirectoryInfo(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)).Name;
+
+    /// <summary>Merged output base name: "merged-YYYYMMDD-HHMMSS" from the earliest GPS fix (UTC).</summary>
+    internal static string MergedBaseName(ConversionOptions opt) =>
+        "merged-" + (opt.StartUtc is DateTime st ? st.ToString("yyyyMMdd-HHmmss") : "unknown");
+
+    private static string Ext(string p, string ext) => Path.HasExtension(p) ? Path.ChangeExtension(p, ext) : p + ext;
 
     private static double? ParseD(string? s) =>
         double.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var v) ? v : null;
 
-    public static TimeZoneInfo ResolveTz(string id)
-    {
-        try { return TimeZoneInfo.FindSystemTimeZoneById(id); }
-        catch { throw new ArgumentException($"Unknown timezone id: '{id}'. Use an IANA id (e.g. 'Europe/Paris') or a Windows id."); }
-    }
-
     private static void PrintHelp()
     {
         Console.WriteLine(
-$@"MyChron2Insta360 {AppInfo.Version} - convert AiM/MyChron RaceStudio3 CSV to GPX/FIT for the Insta360 Stats Dashboard.
+$@"MyChron2Insta360 {AppInfo.Version} - convert RaceStudio3 GPS CSV exports to GPX/FIT for the Insta360 Stats Dashboard.
+
+Input: one or more RaceStudio '..._CSV' folders, a PARENT folder holding several, or a _GPS_o.csv /
+_GPS.csv directly. By default each session becomes its own output file; --merge combines them onto one
+timeline via GPS 'itow'.
 
 Usage:
-  MyChron2Insta360 <input.csv> [options]     CLI mode (any option triggers CLI)
-  MyChron2Insta360                           no args -> GUI
-  MyChron2Insta360 <input.csv>               drag CSV onto the .exe -> GUI, preloaded
+  MyChron2Insta360 <folder> [more folders...] [options]   CLI mode (any option triggers CLI)
+  MyChron2Insta360                                          no args -> GUI
+  MyChron2Insta360 <folder>                                 drag onto the .exe -> GUI, preloaded
 
 Options:
-  -o, --out <file>          Output path (default: next to the input).
+  --merge                   Merge all sessions into ONE output (default: one file per session).
+  -o, --out <file>          Explicit output path (single-output only; extension set per format).
+  --out-dir <folder>        Write outputs into this folder (created if needed).
   --format <gpx|fit|both>   Output format(s). Default gpx. (--fit / --both are shortcuts.)
-  --tz <IANA|Windows>       Session timezone, e.g. 'Europe/Paris'. Default: auto-detect from GPS.
-  --utc-offset <hours>      Fixed UTC offset instead of a zone, e.g. 2. Overrides --tz.
-  --local                   Use the machine's local timezone instead of auto-detecting.
+  --gps10                   Use _GPS.csv (10 Hz) instead of _GPS_o.csv (25 Hz).
+  --hz <n>                  Downsample to n Hz. Default: keep the native rate.
   --nudge <seconds>         Add seconds to every timestamp (fine sync tuning).
-  --hz <n>                  Output rate. Default: auto-match the detected GPS rate.
-  --min-sat <n>             Drop points below this satellite count (default 0 = off).
-  --trim                    Trim leading/trailing standstill (off by default).
+  --max-accuracy <m>        Drop fixes with reported accuracy worse than m metres (default: keep all).
+  --date <YYYY-MM-DD>       Override the session date (only if it isn't in the folder path).
+  --leap <n>                GPS-UTC leap seconds for iTOW (default {ItowTime.DefaultLeapSeconds}).
+  --trim                    Trim leading/trailing standstill per session (off by default).
   -h, --help                Show this help.
   --version                 Show version.
 

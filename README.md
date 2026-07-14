@@ -1,30 +1,59 @@
 # MyChron-GPS-to-Insta360
 
-Convert **AiM RaceStudio3 CSV** exports (from **MyChron** GoKart lap timers) into **GPX** and **FIT**
+Convert **RaceStudio3 GPS CSV exports** (from **MyChron** GoKart lap timers) into **GPX** and **FIT**
 files that the **Insta360 app / Insta360 Studio "Stats Dashboard"** can overlay onto your action-cam
 video — speed, altitude, distance, gradient and a track map, synced automatically to the footage.
 
-A single Windows `.exe` — no runtime to install. **Drag a CSV onto it**, or **double-click** to
-pick a file, or drive it from the **command line**.
+A single Windows `.exe` — no runtime to install. **Drag the export folder onto it**, or **double-click**
+to pick it, or drive it from the **command line**.
 
-## Features (v1.0.0)
+## Getting the CSV export from RaceStudio3
 
-- Parses the AiM CSV (channels matched **by name**, so column order/config doesn't matter).
-- **Automatic timezone** from the GPS coordinates (offline, DST-aware) — or pick a zone / offset.
-- Local → **UTC** timestamping (what Insta360 syncs on), with a **nudge** for fine alignment.
-- **Auto-matches the output rate to the true GPS rate** recovered from the log — the 100 Hz log is
-  up-sampled from a slower GNSS receiver (e.g. **25 Hz on MyChron 6**, 10 Hz on MyChron 5), detected
-  from the interpolation structure. Manual override available.
-- Writes **GPX 1.1** (with `gpxtpx` speed/course) and/or **FIT** (official Garmin SDK).
+The single "AiM CSV" export resamples everything to one rate and has no true GPS time. Instead, use the
+per-channel CSV export, which gives GPS at its native rate plus a GPS-time column. Enable it once:
+
+> **Preferences → Data Download Preferences → Advanced Tab → Additional Export Formats →**
+> tick **"CSV (Comma Separated Values)"**
+
+![RaceStudio3 Data Download Preferences: the Advanced tab with "CSV (Comma Separated Values)" ticked under Additional Export Formats](media/RaceStudio3-Preferences.png)
+
+Now exporting a session writes a **`..._CSV`** folder containing one file per channel. This tool reads
+the GPS files from it:
+
+- **`_GPS_o.csv`** — raw receiver rate (**25 Hz** on MyChron 6). *Default.*
+- **`_GPS.csv`** — a 10 Hz decimation.
+
+Columns: `time, itow, lat, lon, alt, speed, accuracy` — where **`itow`** is GPS time-of-week.
+
+## Why this is accurate
+
+Insta360 syncs telemetry to video **by absolute timestamp**. The `itow` column is real GPS time, so the
+tool derives **exact UTC to the millisecond** — no timezone to configure and no guessing (the calendar
+date is read from the RaceStudio folder path). A `--nudge` / *Time nudge* control remains for trimming
+any residual camera-clock offset.
+
+## Multiple sessions
+
+The MyChron starts a **new session** whenever the kart slows/stops, so one continuous video can span
+several sessions (several `_CSV` folders). Point the tool at a **parent folder** and it finds them all.
+Because every point has exact GPS time, they line up on one timeline automatically.
+
+- **Default:** each session → its own output file.
+- **Merge** (CLI `--merge` / GUI "Merge sessions into one file"): all sessions combined into a single
+  output, one GPX track segment per session so no line is drawn across the stopped gaps.
+
+Output names: an individual file takes its session folder's name; a merged file is
+**`merged-YYYYMMDD-HHMMSS`** built from the earliest GPS timestamp (UTC). Override with `--out` /
+place them elsewhere with `--out-dir`.
+
+## Features
+
+- Reads a RaceStudio `_CSV` folder, a **parent folder of several**, or a `_GPS*.csv` directly.
+- **Exact UTC from GPS `itow`** — no timezone configuration.
+- Keeps the **native GPS rate** (25 Hz); optional downsample.
+- Optional **merge** of multiple sessions, accuracy filter, standstill trim, and **output folder**.
+- Writes **GPX 1.1** (`gpxtpx` speed) and/or **FIT** (official Garmin SDK).
 - **CLI + GUI** in one binary.
-
-## Why timestamps matter
-
-Insta360 syncs telemetry to video **by absolute timestamp**. The CSV header gives only a *local*,
-timezone-less, minute-resolution start time. The tool auto-detects the timezone from the GPS fix, but
-the header's minute resolution still leaves up to ~60 s of slack — trim it with `--nudge` (CLI) /
-the *Time nudge* box (GUI), or the Insta360 mobile app's manual time-correction. If the track's clock
-doesn't overlap the video's clock, the overlay shows nothing.
 
 ## Build
 
@@ -38,39 +67,42 @@ dotnet publish src/MyChron2Insta360.App -c Release
 
 ## Usage
 
-**GUI:** double-click `MyChron2Insta360.exe`, or drag a `.csv` onto it.
+**GUI:** double-click `MyChron2Insta360.exe`, then drag the `..._CSV` folder onto it (or use *Folder…*).
 
 **CLI:**
 
 ```powershell
-MyChron2Insta360 testing.csv                       # GPX, timezone auto-detected from GPS
-MyChron2Insta360 testing.csv --format both         # GPX + FIT
-MyChron2Insta360 testing.csv --tz Europe/Paris --nudge -1.5 --out lap.gpx
+MyChron2Insta360 "...\Session_..._CSV"                       # one session -> GPX, native 25 Hz
+MyChron2Insta360 "...\Casteluccio" --format both             # parent folder -> one file per session
+MyChron2Insta360 "...\Casteluccio" --merge --out-dir C:\out  # merge all sessions into one file
+MyChron2Insta360 "...\_GPS_o.csv" --hz 10 --nudge -1.5
 MyChron2Insta360 --help
 ```
 
 | Option | Meaning |
 |---|---|
-| `-o, --out <file>` | Output path (default: next to the input) |
+| `--merge` | Merge all sessions into ONE output (default: one file per session) |
+| `-o, --out <file>` | Explicit output path, single output only (extension set per format) |
+| `--out-dir <folder>` | Write outputs into this folder (created if needed) |
 | `--format <gpx\|fit\|both>` | Output format(s). Default `gpx` (`--fit` / `--both` are shortcuts) |
-| `--tz <IANA\|Windows>` | Session timezone, e.g. `Europe/Paris`. Default: auto-detect from GPS |
-| `--utc-offset <hours>` | Fixed UTC offset instead of a zone; overrides `--tz` |
-| `--local` | Use the machine's local timezone instead of auto-detecting |
+| `--gps10` | Use `_GPS.csv` (10 Hz) instead of `_GPS_o.csv` (25 Hz) |
+| `--hz <n>` | Downsample to n Hz (default: native rate) |
 | `--nudge <seconds>` | Shift every timestamp to fine-tune sync |
-| `--hz <n>` | Fixed output rate. Default: auto-match the detected GPS rate |
-| `--min-sat <n>` | Drop points below this satellite count (default 0) |
-| `--trim` | Trim leading/trailing standstill (off by default) |
+| `--max-accuracy <m>` | Drop fixes with reported accuracy worse than m metres (default: keep all) |
+| `--date <YYYY-MM-DD>` | Override the session date (only if it isn't in the folder path) |
+| `--leap <n>` | GPS−UTC leap seconds for iTOW (default 18) |
+| `--trim` | Trim leading/trailing standstill per session (off by default) |
 
-Then in the Insta360 app: **Dashboard -> Data Source -> Local Files -> Import**.
+Then in the Insta360 app: **Dashboard → Data Source → Local Files → Import**.
 
 ## Project layout
 
 ```
 src/
-  MyChron2Insta360.Core/   parsing, timestamps, timezone lookup, downsampling, GPX + FIT writers
+  MyChron2Insta360.Core/   RaceStudioGpsCsv (parser), ItowTime (GPS->UTC), Conversion (build/downsample),
+                           GpxWriter, FitWriter
   MyChron2Insta360.App/    single .exe: CLI (Cli.cs) + WinForms GUI (MainForm.cs)
-testing.csv                sample AiM export ("Bigulia short", Corsica)
 ```
 
-Dependencies: [GeoTimeZone](https://www.nuget.org/packages/GeoTimeZone) (coordinate → timezone,
-offline) and [Garmin.FIT.Sdk](https://www.nuget.org/packages/Garmin.FIT.Sdk) (FIT writing).
+Note: the original XRK file is a proprietary AiM binary; this tool intentionally uses the documented
+CSV export instead of a native XRK reader, to stay a dependency-free single binary.
