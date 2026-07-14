@@ -31,6 +31,7 @@ public sealed class MainForm : Form
         ClientSize = new Size(640, 680);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9F);
+        try { Icon = System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath!); } catch { /* keep default icon */ }
         AllowDrop = true;
         DragEnter += (_, e) => { if (e.Data?.GetDataPresent(DataFormats.FileDrop) == true) e.Effect = DragDropEffects.Copy; };
         DragDrop += OnDragDrop;

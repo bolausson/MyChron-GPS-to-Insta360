@@ -1,5 +1,7 @@
 # MyChron-GPS-to-Insta360
 
+<img src="assets/icon/png/icon-128.png" alt="MyChron2Insta360 app icon" align="right" width="120">
+
 **Vibe coded!**
 
 Convert **RaceStudio3 GPS CSV exports** (from **MyChron** GoKart lap timers) into **GPX** and **FIT**
