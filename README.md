@@ -1,5 +1,7 @@
 # MyChron-GPS-to-Insta360
 
+**Vibe coded!**
+
 Convert **RaceStudio3 GPS CSV exports** (from **MyChron** GoKart lap timers) into **GPX** and **FIT**
 files that the **Insta360 app / Insta360 Studio "Stats Dashboard"** can overlay onto your action-cam
 video: speed, altitude, distance, gradient and a track map, all synced automatically to the footage.
@@ -112,3 +114,7 @@ src/
 
 Note: the original XRK file is a proprietary AiM binary. This tool intentionally uses the documented
 CSV export instead of a native XRK reader, to stay a dependency-free single binary.
+
+## License
+
+[GNU General Public License v3.0](LICENSE). Copyright (C) 2026 Bjoern Olausson.
