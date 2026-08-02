@@ -122,7 +122,8 @@ dotnet publish src/MyChron2Insta360.App -c Release
 
 ## Usage
 
-**GUI:** double-click `MyChron2Insta360.exe`, then drag the `..._CSV` folder onto it (or use *Folder…*).
+**GUI:** double-click `MyChron2Insta360.exe`, then drag folders or files onto the list, or add them with
+*Add folder…* / *Add file(s)…*. *Remove* and *Clear* edit the list; nothing runs until you press *Convert*.
 
 **CLI:**
 
@@ -153,6 +154,8 @@ MyChron2Insta360 --help
 | `--trim` | Trim leading/trailing standstill per session (off by default) |
 | `--no-imu-csv` | Do not write the separate accel/gyro CSV (it is written by default) |
 | `--imu-hz <n>` | Downsample the IMU to n Hz (default: native, about 1000 Hz on Insta360) |
+| `-h, --help` | Show the built-in help |
+| `--version` | Show the version |
 
 Then in the Insta360 app: **Dashboard, Data Source, Local Files, Import**.
 
@@ -163,7 +166,7 @@ src/
   MyChron2Insta360.Core/   RaceStudioGpsCsv / RaceStudioImu / RaceStudioChannels (MyChron readers),
                            Insta360Trailer (native .insv/.lrv metadata reader),
                            ItowTime (GPS to UTC), Conversion (build/downsample),
-                           GpxWriter, FitWriter, ImuCsvWriter
+                           Imu (shared sample type), GpxWriter, FitWriter, ImuCsvWriter
   MyChron2Insta360.App/    single .exe: CLI (Cli.cs) + WinForms GUI (MainForm.cs)
 ```
 
