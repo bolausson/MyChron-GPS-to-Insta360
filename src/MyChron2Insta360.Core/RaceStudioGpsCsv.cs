@@ -28,7 +28,7 @@ public sealed class GpsSession
 /// <c>time, itow, lat, lon, alt, speed, accuracy</c>. <c>_GPS_o.csv</c> is the raw receiver rate
 /// (25 Hz on MyChron 6); <c>_GPS.csv</c> is a 10 Hz decimation. Because <c>itow</c> gives exact UTC,
 /// several sessions (the MyChron restarts a session whenever the kart slows/stops) can be discovered
-/// and merged on one continuous timeline — see <see cref="TrackBuilder"/>.
+/// and merged on one continuous timeline, see <see cref="TrackBuilder"/>.
 /// </summary>
 public static class RaceStudioGpsCsv
 {
@@ -41,10 +41,28 @@ public static class RaceStudioGpsCsv
     /// </summary>
     public static List<string> DiscoverGpsFiles(string input, bool gps10 = false)
     {
-        if (File.Exists(input)) return new List<string> { input };
-        if (!Directory.Exists(input)) throw new FileNotFoundException($"Input not found: {input}");
-
         var order = gps10 ? new[] { "_GPS.csv", "_GPS_o.csv" } : GpsFileNames;
+
+        if (File.Exists(input))
+        {
+            // A GPS csv is used as-is. Any other channel file (AccelerometerX.csv, GyroZ.csv, RPM.csv,
+            // ...) stands in for its session, so picking any file from a "_CSV" folder just works.
+            string name = Path.GetFileName(input);
+            if (GpsFileNames.Any(n => string.Equals(n, name, StringComparison.OrdinalIgnoreCase)))
+                return new List<string> { input };
+
+            string? parent = Path.GetDirectoryName(Path.GetFullPath(input));
+            if (parent is not null)
+                foreach (var n in order)
+                {
+                    string p = Path.Combine(parent, n);
+                    if (File.Exists(p)) return new List<string> { p };
+                }
+            throw new FileNotFoundException(
+                $"'{name}' is not a GPS CSV, and its folder has no _GPS_o.csv / _GPS.csv:\n{parent}");
+        }
+
+        if (!Directory.Exists(input)) throw new FileNotFoundException($"Input not found: {input}");
 
         // A single session folder contains the GPS file directly.
         foreach (var n in order)

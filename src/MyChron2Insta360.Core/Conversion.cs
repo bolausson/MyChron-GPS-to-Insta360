@@ -3,7 +3,7 @@ namespace MyChron2Insta360.Core;
 /// <summary>User-tunable options for turning GPS session(s) into an output track.</summary>
 public sealed class ConversionOptions
 {
-    /// <summary>Seconds added to every timestamp — fine-tunes sync against the camera clock.</summary>
+    /// <summary>Seconds added to every timestamp, fine-tunes sync against the camera clock.</summary>
     public double ManualOffsetSeconds { get; set; }
 
     /// <summary>Target output rate. 0 = keep the file's native rate (no downsampling).</summary>
@@ -21,7 +21,7 @@ public sealed class ConversionOptions
     /// <summary>Override the date used to resolve the GPS week (else taken from each folder path / file time).</summary>
     public DateTime? DateOverrideUtc { get; set; }
 
-    /// <summary>GPS − UTC leap seconds applied to iTOW.</summary>
+    /// <summary>GPS - UTC leap seconds applied to iTOW.</summary>
     public int LeapSeconds { get; set; } = ItowTime.DefaultLeapSeconds;
 
     // ---- outputs, filled in by TrackBuilder ----

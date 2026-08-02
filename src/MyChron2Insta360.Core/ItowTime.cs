@@ -10,7 +10,7 @@ public static class ItowTime
     private static readonly DateTime GpsEpoch = new(1980, 1, 6, 0, 0, 0, DateTimeKind.Utc);
     private const double SecondsPerWeek = 604800.0;
 
-    /// <summary>GPS − UTC leap seconds. 18 since 2017; none announced through 2026.</summary>
+    /// <summary>GPS - UTC leap seconds. 18 since 2017; none announced through 2026.</summary>
     public const int DefaultLeapSeconds = 18;
 
     public static DateTime ToUtc(double itowMs, DateTime dateHint, int leapSeconds = DefaultLeapSeconds)
