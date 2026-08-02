@@ -46,6 +46,16 @@ Drop an **`.insv`** or **`.lrv`** file in and the tool reads the camera's own me
 - **GPS** at the rate the source provided (about 10 Hz), already stamped with absolute UTC.
 - **IMU**: accelerometer and gyroscope at roughly 1000 Hz.
 
+Point it at a single video or at a whole camera folder (for example `DCIM\Camera01`). Each capture
+writes a main `VID_....insv` and an `LRV_....lrv` proxy that share the same telemetry, so the two are
+treated as one clip and never produce duplicate output. Clips are read in parallel.
+
+By default every clip becomes its own output set. Tick **Merge sessions into one file** (or pass
+`--merge`) to combine them onto a single timeline, named `merged-YYYYMMDD-HHMMSS`. Because every point
+carries absolute UTC, this also stitches a **long recording that the camera split into several files**
+back into one continuous track. The log prints the gap between consecutive clips, so you can see
+whether they are one split recording or separate runs.
+
 The X-series cameras have no built-in GPS, so a clip only contains GPS if a **GPS Preview Remote**, a
 **GPS Action Remote**, or the phone app was connected **while recording**. Adding a track afterwards in
 the Insta360 app is only a dashboard overlay and does not write GPS into the file. Telemetry may sit in
@@ -123,6 +133,8 @@ MyChron2Insta360 "...\Casteluccio" --merge --out-dir C:\out  # merge all session
 MyChron2Insta360 "...\_GPS_o.csv" --hz 10 --nudge -1.5
 MyChron2Insta360 "...\VID_20260801_171316_00_005.insv" --both      # Insta360 video: GPS + IMU
 MyChron2Insta360 "...\LRV_20260801_171316_01_005.lrv" --imu-hz 50  # downsample the 1 kHz IMU
+MyChron2Insta360 "...\DCIM\Camera01" --both                        # every clip in a camera folder
+MyChron2Insta360 "...\DCIM\Camera01" --merge --both                # all clips on one timeline
 MyChron2Insta360 --help
 ```
 

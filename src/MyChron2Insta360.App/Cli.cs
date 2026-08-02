@@ -66,9 +66,10 @@ internal static class Cli
                 opt.DateOverrideUtc = DateTime.SpecifyKind(d, DateTimeKind.Utc);
             }
 
-            // Insta360 video input (.insv/.lrv) uses the native trailer parser instead of the CSV pipeline.
-            if (inputs.Count == 1 && Insta360Trailer.HasTrailer(inputs[0]))
-                return RunInsta360(inputs[0], output, outDir, format, writeImuCsv, imuHz);
+            // Insta360 video input (.insv/.lrv, or folders holding them) uses the native trailer parser.
+            var clips = Insta360Trailer.DiscoverClips(inputs);
+            if (clips.Count > 0)
+                return RunInsta360(clips, output, outDir, format, writeImuCsv, imuHz, merge);
 
             var sessions = RaceStudioGpsCsv.LoadAll(inputs, gps10);
             Console.WriteLine($"Found {sessions.Count} session(s):");
@@ -165,49 +166,144 @@ internal static class Cli
         return null;
     }
 
-    private static int RunInsta360(string input, string? output, string? outDir, string format, bool writeImuCsv, double imuHz)
+    private static int RunInsta360(List<Insta360Clip> clips, string? output, string? outDir, string format,
+                                   bool writeImuCsv, double imuHz, bool merge)
     {
-        var tel = Insta360Trailer.Parse(input);
-        Console.WriteLine($"Insta360 {tel.Model ?? "?"} ({tel.Serial ?? "?"}): {tel.Gps.Count} GPS points, {tel.Imu.Count} IMU samples");
-        if (tel.Gps.Count == 0 && tel.Imu.Count == 0)
-        { Console.Error.WriteLine("No GPS or IMU telemetry in this file (was a GPS remote / phone connected while recording?)."); return 1; }
-
-        // Anchor IMU to absolute UTC via the first GPS fix (approximate; exact offset needs the metadata record).
-        if (tel.Gps.Count > 0)
-        {
-            DateTime g0 = tel.Gps[0].Utc;
-            foreach (var s in tel.Imu) s.Utc = g0.AddSeconds(s.ElapsedS);
-        }
-
+        Console.WriteLine($"Found {clips.Count} Insta360 clip(s).");
         if (outDir is not null) Directory.CreateDirectory(outDir);
-        string dir = outDir ?? Path.GetDirectoryName(Path.GetFullPath(input))!;
-        string baseName = Path.GetFileNameWithoutExtension(input);
-        string basePath = output ?? Path.Combine(dir, baseName);
 
-        if (tel.Gps.Count > 0)
+        // Read the clips in parallel: they are independent, and parsing plus encoding is CPU-bound.
+        // Parallelism is capped because each clip holds its whole IMU stream in memory.
+        var slots = new (Insta360Clip Clip, Insta360Telemetry Tel, string File)?[clips.Count];
+        Parallel.For(0, clips.Count, new ParallelOptions { MaxDegreeOfParallelism = Parallelism(clips.Count) }, i =>
         {
-            var segs = new List<List<TrackPoint>> { tel.Gps };
-            Console.WriteLine($"  GPS UTC span: {tel.Gps[0].Utc:yyyy-MM-dd HH:mm:ss}Z .. {tel.Gps[^1].Utc:HH:mm:ss}Z");
-            var fitImu = imuHz > 0 ? ImuCsvWriter.Downsample(tel.Imu, imuHz) : tel.Imu;
-            var extras = new FitWriter.Extras { Imu = fitImu.Count > 0 ? fitImu : null };
-            foreach (var (p, isFit) in FormatPaths(basePath, format))
+            var tel = Insta360Trailer.ParseClip(clips[i], out string used);
+            if (tel.Gps.Count > 0)
             {
-                if (isFit) FitWriter.Write(p, segs, baseName, extras);
-                else GpxWriter.Write(p, segs, baseName);
-                Console.WriteLine($"Wrote {p}");
+                DateTime g0 = tel.Gps[0].Utc; // anchor the IMU to absolute UTC via the first fix
+                foreach (var s in tel.Imu) s.Utc = g0.AddSeconds(s.ElapsedS);
             }
-        }
-        else Console.WriteLine("  (no GPS in this file; skipping GPX/FIT)");
+            slots[i] = (clips[i], tel, used);
+        });
 
-        if (writeImuCsv && tel.Imu.Count > 0)
+        var loaded = new List<(Insta360Clip Clip, Insta360Telemetry Tel, string File)>();
+        foreach (var slot in slots)
         {
-            var csvImu = imuHz > 0 ? ImuCsvWriter.Downsample(tel.Imu, imuHz) : tel.Imu;
-            string csv = basePath + "_imu.csv";
-            ImuCsvWriter.Write(csv, csvImu);
-            double span = csvImu[^1].ElapsedS;
-            Console.WriteLine($"Wrote {csv}  ({csvImu.Count} IMU samples, {span:0.#}s, ~{(span > 0 ? (csvImu.Count - 1) / span : 0):0} Hz)");
+            if (slot is not { } l) continue;
+            Console.WriteLine($"  {Path.GetFileName(l.File)}: {l.Tel.Gps.Count} GPS points, {l.Tel.Imu.Count} IMU samples" +
+                              (l.Tel.Gps.Count > 0 ? $"  {l.Tel.Gps[0].Utc:HH:mm:ss}Z..{l.Tel.Gps[^1].Utc:HH:mm:ss}Z" : ""));
+            if (l.Tel.Gps.Count == 0 && l.Tel.Imu.Count == 0)
+            { Console.WriteLine("    no telemetry (was a GPS remote or the phone app connected while recording?)"); continue; }
+            loaded.Add(l);
+        }
+        if (loaded.Count == 0) { Console.Error.WriteLine("No telemetry found in any clip."); return 1; }
+
+        loaded.Sort((a, b) => (a.Tel.Gps.Count > 0 ? a.Tel.Gps[0].Utc : DateTime.MaxValue)
+                       .CompareTo(b.Tel.Gps.Count > 0 ? b.Tel.Gps[0].Utc : DateTime.MaxValue));
+        ReportClipGaps(loaded.Select(l => l.Tel).ToList());
+
+        if (merge && loaded.Count > 1)
+        {
+            Console.WriteLine("Mode: MERGE, one output file.");
+            var segs = loaded.Where(l => l.Tel.Gps.Count > 0).Select(l => l.Tel.Gps).ToList();
+            var imu = new List<ImuSample>();
+            foreach (var l in loaded) imu.AddRange(l.Tel.Imu);
+            imu.Sort((a, b) => (a.Utc ?? DateTime.MinValue).CompareTo(b.Utc ?? DateTime.MinValue));
+            if (imuHz > 0) imu = DownsampleByUtc(imu, imuHz);
+
+            DateTime? start = segs.Count > 0 ? segs[0][0].Utc : imu.FirstOrDefault()?.Utc;
+            string baseName = "merged-" + (start is DateTime st ? st.ToString("yyyyMMdd-HHmmss") : "unknown");
+            string dir = outDir ?? Path.GetDirectoryName(loaded[0].File)!;
+            string basePath = output ?? Path.Combine(dir, baseName);
+            string name = $"{baseName} ({loaded.Count} clips)";
+
+            if (segs.Count > 0)
+            {
+                int total = segs.Sum(s => s.Count);
+                Console.WriteLine($"  merged {total} GPS points, UTC {segs[0][0].Utc:yyyy-MM-dd HH:mm:ss}Z .. {segs[^1][^1].Utc:HH:mm:ss}Z");
+                WriteJob(segs, basePath, name, format, new FitWriter.Extras { Imu = imu.Count > 0 ? imu : null });
+            }
+            if (writeImuCsv && imu.Count > 0) WriteImuCsv(basePath, imu);
+        }
+        else
+        {
+            if (loaded.Count > 1) Console.WriteLine("Mode: individual, one output set per clip (use --merge to combine).");
+            // Clips are independent, so encode and write them in parallel; messages are buffered per
+            // clip and printed in order afterwards so the log stays readable.
+            var logs = new List<string>[loaded.Count];
+            Parallel.For(0, loaded.Count, new ParallelOptions { MaxDegreeOfParallelism = Parallelism(loaded.Count) }, i =>
+            {
+                var (clip, tel, used) = loaded[i];
+                var log = logs[i] = new List<string>();
+                string dir = outDir ?? Path.GetDirectoryName(used)!;
+                string baseName = Path.GetFileNameWithoutExtension(used);
+                string basePath = (output is not null && loaded.Count == 1) ? output : Path.Combine(dir, baseName);
+                var imu = imuHz > 0 ? ImuCsvWriter.Downsample(tel.Imu, imuHz) : tel.Imu;
+
+                if (tel.Gps.Count > 0)
+                {
+                    var extras = new FitWriter.Extras { Imu = imu.Count > 0 ? imu : null };
+                    foreach (var (p, isFit) in FormatPaths(basePath, format))
+                    {
+                        if (isFit) FitWriter.Write(p, new List<List<TrackPoint>> { tel.Gps }, baseName, extras);
+                        else GpxWriter.Write(p, new List<List<TrackPoint>> { tel.Gps }, baseName);
+                        log.Add($"Wrote {p}");
+                    }
+                }
+                else log.Add($"  [{baseName}] no GPS, skipping GPX/FIT");
+
+                if (writeImuCsv && imu.Count > 0)
+                {
+                    string csv = basePath + "_imu.csv";
+                    ImuCsvWriter.Write(csv, imu);
+                    log.Add($"Wrote {csv}  ({imu.Count} IMU samples)");
+                }
+            });
+            foreach (var log in logs)
+                if (log is not null) foreach (var line in log) Console.WriteLine(line);
         }
         return 0;
+    }
+
+    /// <summary>
+    /// How many clips to process at once. Capped well below the core count because each clip holds its
+    /// entire IMU stream in memory (roughly 100 MB for a 17 minute clip at 1 kHz).
+    /// </summary>
+    private static int Parallelism(int items) => Math.Max(1, Math.Min(items, Math.Min(4, Environment.ProcessorCount)));
+
+    private static void WriteImuCsv(string basePath, List<ImuSample> imu)
+    {
+        string csv = basePath + "_imu.csv";
+        ImuCsvWriter.Write(csv, imu);
+        Console.WriteLine($"Wrote {csv}  ({imu.Count} IMU samples)");
+    }
+
+    /// <summary>Downsample on absolute time, needed once clips are concatenated onto one timeline.</summary>
+    private static List<ImuSample> DownsampleByUtc(List<ImuSample> imu, double hz)
+    {
+        var outp = new List<ImuSample>();
+        double min = 1.0 / hz;
+        DateTime? last = null;
+        foreach (var s in imu)
+        {
+            if (s.Utc is not DateTime u) continue;
+            if (last is DateTime l && (u - l).TotalSeconds < min - 1e-9) continue;
+            last = u;
+            outp.Add(s);
+        }
+        return outp;
+    }
+
+    /// <summary>Show the gap between consecutive clips, which reveals a split recording versus separate runs.</summary>
+    private static void ReportClipGaps(List<Insta360Telemetry> tels)
+    {
+        var withGps = tels.Where(t => t.Gps.Count > 0).ToList();
+        for (int i = 1; i < withGps.Count; i++)
+        {
+            double gap = (withGps[i].Gps[0].Utc - withGps[i - 1].Gps[^1].Utc).TotalSeconds;
+            string how = gap <= 5 ? "continuous, one split recording" : "separate recordings";
+            Console.WriteLine($"  gap before clip {i + 1}: {gap:0.#} s ({how})");
+        }
     }
 
     private static void ReportBuild(ConversionOptions opt)

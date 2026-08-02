@@ -18,6 +18,19 @@ public sealed class Insta360Telemetry
 }
 
 /// <summary>
+/// One recorded clip and the file(s) carrying its telemetry, best first. A capture writes a main
+/// <c>VID_....insv</c> and a low-res <c>LRV_....lrv</c> proxy that share the same trailer, so they are
+/// grouped and read once. Some models only fill one of the two, hence the ordered fallback list.
+/// </summary>
+public sealed class Insta360Clip
+{
+    public string Key { get; init; } = "";
+    public List<string> Files { get; } = new();
+    public string Primary => Files[0];
+    public string Name => Path.GetFileNameWithoutExtension(Primary);
+}
+
+/// <summary>
 /// Native reader for the proprietary trailer appended to Insta360 .insv/.lrv/.insp files (ISO-BMFF
 /// MP4 plus an EOF trailer with magic "8db42d694ccc418790edff439fe026bf"). The trailer is read from
 /// EOF backwards: a 72-byte footer holds the trailer size, then a chain of records whose 6-byte
@@ -33,6 +46,75 @@ public static class Insta360Trailer
     private const int GpsRecordSize = 53;
     private const double RadToDeg = 180.0 / Math.PI;
     private static readonly DateTime UnixEpoch = new(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+    public static readonly string[] VideoExtensions = { ".insv", ".lrv", ".insp" };
+
+    /// <summary>
+    /// Collect the Insta360 clips covered by the given inputs. Each input may be a video file or a
+    /// folder (searched recursively). The .insv and .lrv of one capture are grouped into a single clip
+    /// so a camera folder does not produce duplicate output, and clips are returned in filename order,
+    /// which for the camera's naming is also recording order.
+    /// </summary>
+    public static List<Insta360Clip> DiscoverClips(IEnumerable<string> inputs)
+    {
+        var files = new List<string>();
+        foreach (var input in inputs)
+        {
+            if (File.Exists(input))
+            {
+                if (HasTrailer(input)) files.Add(Path.GetFullPath(input));
+            }
+            else if (Directory.Exists(input))
+            {
+                foreach (var f in Directory.EnumerateFiles(input, "*.*", SearchOption.AllDirectories))
+                    if (VideoExtensions.Contains(Path.GetExtension(f), StringComparer.OrdinalIgnoreCase) && HasTrailer(f))
+                        files.Add(Path.GetFullPath(f));
+            }
+        }
+
+        var clips = new List<Insta360Clip>();
+        foreach (var group in files.Distinct(StringComparer.OrdinalIgnoreCase).GroupBy(RecordingKey))
+        {
+            var clip = new Insta360Clip { Key = group.Key };
+            // Prefer the main .insv, fall back to the .lrv proxy if it carries no telemetry.
+            clip.Files.AddRange(group.OrderBy(p =>
+                Path.GetExtension(p).Equals(".insv", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+                .ThenBy(p => p, StringComparer.OrdinalIgnoreCase));
+            clips.Add(clip);
+        }
+        clips.Sort((a, b) => string.Compare(Path.GetFileName(a.Primary), Path.GetFileName(b.Primary), StringComparison.OrdinalIgnoreCase));
+        return clips;
+    }
+
+    /// <summary>
+    /// Parse a clip, trying its files in preference order until one yields telemetry. Returns the last
+    /// attempt (possibly empty) when none do, so callers can report "no telemetry" rather than throw.
+    /// </summary>
+    public static Insta360Telemetry ParseClip(Insta360Clip clip, out string usedFile)
+    {
+        Insta360Telemetry? last = null;
+        usedFile = clip.Primary;
+        foreach (var f in clip.Files)
+        {
+            var t = Parse(f);
+            usedFile = f;
+            if (t.Gps.Count > 0 || t.Imu.Count > 0) return t;
+            last = t;
+        }
+        return last ?? new Insta360Telemetry();
+    }
+
+    /// <summary>
+    /// Identity of the capture a file belongs to. Names look like VID_20260801_171316_00_005.insv and
+    /// LRV_20260801_171316_01_005.lrv: the date, time and trailing sequence identify the capture, while
+    /// the lens/stream field differs between the two, so it is excluded.
+    /// </summary>
+    private static string RecordingKey(string path)
+    {
+        string name = Path.GetFileNameWithoutExtension(path);
+        var p = name.Split('_');
+        return p.Length >= 5 ? $"{p[1]}_{p[2]}_{p[^1]}" : name;
+    }
 
     /// <summary>True if the file ends with the Insta360 trailer magic.</summary>
     public static bool HasTrailer(string path)

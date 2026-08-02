@@ -219,13 +219,18 @@ public sealed class MainForm : Form
         var paths = InputPaths();
         if (paths.Count == 0) { _resolved.Text = ""; return; }
 
-        int videos = paths.Count(p => File.Exists(p) && Insta360Trailer.HasTrailer(p));
-        if (videos > 0)
+        try
         {
-            _resolved.ForeColor = Color.DimGray;
-            _resolved.Text = $"→ {videos} Insta360 video(s): GPS + IMU read from the file's metadata";
-            return;
+            var clips = Insta360Trailer.DiscoverClips(paths);
+            if (clips.Count > 0)
+            {
+                _resolved.ForeColor = Color.DimGray;
+                string how = clips.Count > 1 ? (_merge.Checked ? ", merge into one" : ", one file each") : "";
+                _resolved.Text = $"→ {clips.Count} Insta360 clip(s): GPS + IMU from the file metadata{how}";
+                return;
+            }
         }
+        catch { /* fall through to the RaceStudio check */ }
 
         int total = 0, bad = 0;
         foreach (var p in paths)
@@ -266,53 +271,97 @@ public sealed class MainForm : Form
         _log.AppendText(msg + Environment.NewLine);
     }
 
-    /// <summary>Convert Insta360 video file(s) via the native trailer parser.</summary>
-    private async Task ConvertInsta360Async(List<string> videos, bool gpx, bool fit, bool imuCsv, double imuHz)
+    /// <summary>Convert Insta360 clips via the native trailer parser, individually or merged.</summary>
+    private async Task ConvertInsta360Async(List<Insta360Clip> clips, bool gpx, bool fit, bool imuCsv, double imuHz, bool merge)
     {
         string? outDir = string.IsNullOrWhiteSpace(_outDir.Text) ? null : _outDir.Text.Trim();
         _convert.Enabled = false;
+        Log($"Found {clips.Count} Insta360 clip(s), reading …");
         try
         {
             var written = await Task.Run(() =>
             {
                 var files = new List<string>();
-                foreach (var v in videos)
+                if (outDir is not null) Directory.CreateDirectory(outDir);
+
+                // Clips are independent, so read and encode them in parallel. The degree is capped
+                // because each clip holds its whole IMU stream in memory.
+                int par = Math.Max(1, Math.Min(clips.Count, Math.Min(4, Environment.ProcessorCount)));
+                var slots = new (Insta360Telemetry Tel, string File)?[clips.Count];
+                Parallel.For(0, clips.Count, new ParallelOptions { MaxDegreeOfParallelism = par }, i =>
                 {
-                    var tel = Insta360Trailer.Parse(v);
-                    Log($"{Path.GetFileName(v)}: {tel.Model ?? "Insta360"}, {tel.Gps.Count} GPS points, {tel.Imu.Count} IMU samples");
-                    if (tel.Gps.Count == 0 && tel.Imu.Count == 0)
-                    { Log("  no telemetry (was a GPS remote or the phone app connected while recording?)"); continue; }
-
-                    if (tel.Gps.Count > 0)
-                        foreach (var s in tel.Imu) s.Utc = tel.Gps[0].Utc.AddSeconds(s.ElapsedS);
-
-                    string dir = outDir ?? Path.GetDirectoryName(Path.GetFullPath(v))!;
-                    if (outDir is not null) Directory.CreateDirectory(outDir);
-                    string baseName = Path.GetFileNameWithoutExtension(v);
-                    string basePath = Path.Combine(dir, baseName);
-                    var imu = imuHz > 0 ? ImuCsvWriter.Downsample(tel.Imu, imuHz) : tel.Imu;
-
-                    if (tel.Gps.Count > 0)
+                    var t = Insta360Trailer.ParseClip(clips[i], out string used);
+                    if (t.Gps.Count > 0)
                     {
-                        var segs = new List<List<TrackPoint>> { tel.Gps };
-                        Log($"  UTC span: {tel.Gps[0].Utc:yyyy-MM-dd HH:mm:ss}Z .. {tel.Gps[^1].Utc:HH:mm:ss}Z");
-                        if (gpx) { var p = basePath + ".gpx"; GpxWriter.Write(p, segs, baseName); files.Add(p); }
-                        if (fit)
+                        DateTime g0 = t.Gps[0].Utc;
+                        foreach (var s in t.Imu) s.Utc = g0.AddSeconds(s.ElapsedS);
+                    }
+                    slots[i] = (t, used);
+                });
+
+                var loaded = new List<(Insta360Telemetry Tel, string File)>();
+                foreach (var s in slots)
+                {
+                    if (s is not { } l) continue;
+                    Log($"  {Path.GetFileName(l.File)}: {l.Tel.Gps.Count} GPS points, {l.Tel.Imu.Count} IMU samples");
+                    if (l.Tel.Gps.Count == 0 && l.Tel.Imu.Count == 0)
+                    { Log("    no telemetry (was a GPS remote or the phone app connected while recording?)"); continue; }
+                    loaded.Add(l);
+                }
+                if (loaded.Count == 0) return files;
+                loaded.Sort((a, b) => (a.Tel.Gps.Count > 0 ? a.Tel.Gps[0].Utc : DateTime.MaxValue)
+                               .CompareTo(b.Tel.Gps.Count > 0 ? b.Tel.Gps[0].Utc : DateTime.MaxValue));
+
+                if (merge && loaded.Count > 1)
+                {
+                    var segs = loaded.Where(l => l.Tel.Gps.Count > 0).Select(l => l.Tel.Gps).ToList();
+                    var imu = new List<ImuSample>();
+                    foreach (var l in loaded) imu.AddRange(l.Tel.Imu);
+                    imu.Sort((a, b) => (a.Utc ?? DateTime.MinValue).CompareTo(b.Utc ?? DateTime.MinValue));
+                    if (imuHz > 0)
+                    {
+                        var thin = new List<ImuSample>(); DateTime? last = null;
+                        foreach (var s in imu)
                         {
-                            var p = basePath + ".fit";
-                            FitWriter.Write(p, segs, baseName, new FitWriter.Extras { Imu = imu.Count > 0 ? imu : null });
-                            files.Add(p);
+                            if (s.Utc is not DateTime u) continue;
+                            if (last is DateTime lu && (u - lu).TotalSeconds < 1.0 / imuHz - 1e-9) continue;
+                            last = u; thin.Add(s);
                         }
+                        imu = thin;
                     }
-                    else Log("  no GPS in this file; skipping GPX/FIT");
-
-                    if (imuCsv && imu.Count > 0)
+                    DateTime? start = segs.Count > 0 ? segs[0][0].Utc : imu.FirstOrDefault()?.Utc;
+                    string baseName = "merged-" + (start is DateTime st ? st.ToString("yyyyMMdd-HHmmss") : "unknown");
+                    string dir = outDir ?? Path.GetDirectoryName(loaded[0].File)!;
+                    string basePath = Path.Combine(dir, baseName);
+                    string name = $"{baseName} ({loaded.Count} clips)";
+                    Log($"Merging {loaded.Count} clips, {segs.Sum(s => s.Count)} GPS points.");
+                    if (segs.Count > 0)
                     {
-                        var p = basePath + "_imu.csv";
-                        ImuCsvWriter.Write(p, imu);
-                        files.Add(p);
-                        Log($"  IMU: {imu.Count} samples written");
+                        if (gpx) { var p = basePath + ".gpx"; GpxWriter.Write(p, segs, name); files.Add(p); }
+                        if (fit) { var p = basePath + ".fit"; FitWriter.Write(p, segs, name, new FitWriter.Extras { Imu = imu.Count > 0 ? imu : null }); files.Add(p); }
                     }
+                    if (imuCsv && imu.Count > 0) { var p = basePath + "_imu.csv"; ImuCsvWriter.Write(p, imu); files.Add(p); }
+                }
+                else
+                {
+                    var per = new List<string>[loaded.Count];
+                    Parallel.For(0, loaded.Count, new ParallelOptions { MaxDegreeOfParallelism = par }, i =>
+                    {
+                        var (tel, used) = loaded[i];
+                        var made = per[i] = new List<string>();
+                        string dir = outDir ?? Path.GetDirectoryName(used)!;
+                        string baseName = Path.GetFileNameWithoutExtension(used);
+                        string basePath = Path.Combine(dir, baseName);
+                        var imu = imuHz > 0 ? ImuCsvWriter.Downsample(tel.Imu, imuHz) : tel.Imu;
+                        if (tel.Gps.Count > 0)
+                        {
+                            var segs = new List<List<TrackPoint>> { tel.Gps };
+                            if (gpx) { var p = basePath + ".gpx"; GpxWriter.Write(p, segs, baseName); made.Add(p); }
+                            if (fit) { var p = basePath + ".fit"; FitWriter.Write(p, segs, baseName, new FitWriter.Extras { Imu = imu.Count > 0 ? imu : null }); made.Add(p); }
+                        }
+                        if (imuCsv && imu.Count > 0) { var p = basePath + "_imu.csv"; ImuCsvWriter.Write(p, imu); made.Add(p); }
+                    });
+                    foreach (var m in per) if (m is not null) files.AddRange(m);
                 }
                 return files;
             });
@@ -347,11 +396,11 @@ public sealed class MainForm : Form
         }
         double imuHz = (double)_imuHz.Value;
 
-        // Insta360 video input takes the native trailer path instead of the RaceStudio CSV pipeline.
-        var videos = inputs.Where(p => File.Exists(p) && Insta360Trailer.HasTrailer(p)).ToList();
-        if (videos.Count > 0)
+        // Insta360 video input (files or folders holding them) takes the native trailer path.
+        var clips = Insta360Trailer.DiscoverClips(inputs);
+        if (clips.Count > 0)
         {
-            await ConvertInsta360Async(videos, gpx, fit, imuCsv, imuHz);
+            await ConvertInsta360Async(clips, gpx, fit, imuCsv, imuHz, _merge.Checked);
             return;
         }
 
