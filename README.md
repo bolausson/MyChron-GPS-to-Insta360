@@ -68,6 +68,7 @@ the `.insv` or in the matching `.lrv`, so if one comes up empty, try the other.
 | **GPX** | GPS track only: position, altitude, per-point speed and time. Best for maps and Insta360. |
 | **FIT** | GPS track plus accelerometer and gyroscope, temperature and lap splits (where the source has them). |
 | **IMU CSV** | Accelerometer (g) and gyroscope (deg/s), one row per sample. Same columns for both sources. |
+| **Telemetry Overlay** | One wide CSV holding every channel the logger recorded, for goprotelemetryextractor.com. MyChron sessions only. |
 
 The IMU CSV is written by default; untick **IMU CSV** in the GUI or pass `--no-imu-csv` to skip it. Its
 columns are `utc, elapsed_s, accel_x_g, accel_y_g, accel_z_g, gyro_x_dps, gyro_y_dps, gyro_z_dps`. Note
@@ -75,6 +76,74 @@ that each device uses its own axis directions, so MyChron and Insta360 axes are 
 
 Because the Insta360 IMU runs near 1000 Hz, a full session makes a large CSV (about 70 MB for 17
 minutes). Use **IMU rate (Hz)** in the GUI or `--imu-hz` to downsample, for example `--imu-hz 50`.
+
+## Telemetry Overlay export
+
+[Telemetry Overlay](https://goprotelemetryextractor.com/telemetry-overlay-gopro-gps) wants one wide
+file, while RaceStudio exports one CSV per channel. Tick **Telemetry Overlay** (or pass
+`--format telemetry-overlay`) to merge a session into a single AiM-style CSV with GPS, IMU, lap
+beacons and every other channel the logger recorded on one time base.
+
+Columns are named so they bind to Telemetry Overlay's gauges with no remapping, and **no
+`remapheaders.txt` is written**: re-declaring names the app already knows makes the whole file fail to
+load. The channel list is discovered, not hard-coded, so a logger with probes fitted brings its water
+temperature, EGT or brake pressure along too:
+
+- a channel whose name and units the app knows is emitted unchanged;
+- a few are renamed to match (`Internal Batt` becomes `Battery`, `Water Temp` becomes
+  `Coolant Temperature`), each verified against the app's own table before use;
+- anything unrecognised (EGT, lambda and AFR have no entry at all) is emitted verbatim and arrives as
+  an extra stream, which you reach with **Read extra streams** and a Custom gauge;
+- a channel that is all zero, the signature of a sensor that is not plugged in, is dropped so you do
+  not get a permanently dead gauge. A flat but non-zero channel is kept, with a warning.
+
+Every decision is logged, so if a gauge you expected is missing the reason is in the output:
+
+```
+Internal Batt (V): bound as Battery (V), renamed to match
+Logger Temperature (C): bound as Logger Temperature (°C), renamed to match
+RPM: skipped, all 68477 samples are zero (sensor not connected?)
+```
+
+The **mount tilt correction applies here as well**, from the same `--tilt`. Lap beacons come from the
+logger's own lap table, so Telemetry Overlay's lap timer matches it.
+
+Signs are a preference rather than a correctness question, since every gauge that can be mirrored has
+an invert box: steering is negated by default because the gauge renders it mirrored, and lateral g is
+left in the "seat of the pants" sense. `--no-to-invert-steering` and `--to-invert-lateral` swap either.
+`--to-rate` sets the output grid, 50 Hz by default, matching the native accel and gyro rate.
+
+This export reads a RaceStudio session folder, so it does not apply to Insta360 video input.
+`docs/TelemetryOverlay-CSV-Spec.md` documents the file format in full.
+
+## Mount tilt correction
+
+A MyChron sits at an angle on the steering wheel, so it never measures level. A slice of gravity stays
+permanently in the longitudinal channel (0.23 g on the test kart, which reads like braking that never
+stops), and real braking, cornering and bumps get mixed between axes.
+
+Tick **Correct mount tilt** (or pass `--tilt`) and the tool rotates the accelerometer and gyroscope so
+gravity sits back on the vertical axis. Leave the angle box empty and it is measured from the data;
+type an angle to use one you already know. **Autodetect** measures it and fills the box in, and
+`--detect-tilt` prints the same report without converting anything.
+
+Gravity is the only absolute reference an IMU has, so the angle is read from moments when the kart is
+barely accelerating or turning. Those moments are pooled per time block and combined with a **median**,
+which matters: a log usually ends with the kart parked on whatever slope it stopped on, and on the test
+session that final stretch alone reads 23.5° against the 13.0° measured on track. A mean would split the
+difference and be wrong by several degrees; the median ignores it.
+
+The log states what was measured and how solid it is, and warns when the sample was poor:
+
+```
+Tilt detected: 13.0° from +Z (lean +12.9° toward X, +1.4° toward Y),
+               from 1900 steady samples in 29 block(s), spread 1.3°, |g|=1.004
+```
+
+Two limits worth knowing. Gravity fixes pitch and roll but says nothing about heading, so the correction
+levels the logger without rotating it about the vertical axis. And a logger clamped to the steering wheel
+turns with the wheel: the tilt *angle* stays put, but the direction it leans swings as you steer, so the
+correction is exact with the wheel straight and drifts slightly at full lock.
 
 ## Why this is accurate
 
@@ -106,6 +175,8 @@ place the files elsewhere with `--out-dir`.
 - Keeps the **native rates** (GPS 25 Hz, IMU 50 Hz on MyChron, about 1000 Hz on Insta360), each with an
   optional downsample.
 - Extracts **accelerometer and gyroscope**, plus **temperature** and **lap splits** from MyChron.
+- Optional **mount tilt correction**, with the angle measured from the data.
+- Merges a whole session into one **Telemetry Overlay** CSV, with the channel list discovered.
 - Optional **merge** of multiple sessions, accuracy filter, standstill trim, and **output folder**.
 - Writes **GPX 1.1** (`gpxtpx` speed), **FIT** (official Garmin SDK) and an **IMU CSV**.
 - **CLI + GUI** in one binary.
@@ -136,6 +207,11 @@ MyChron2Insta360 "...\VID_20260801_171316_00_005.insv" --both      # Insta360 vi
 MyChron2Insta360 "...\LRV_20260801_171316_01_005.lrv" --imu-hz 50  # downsample the 1 kHz IMU
 MyChron2Insta360 "...\DCIM\Camera01" --both                        # every clip in a camera folder
 MyChron2Insta360 "...\DCIM\Camera01" --merge --both                # all clips on one timeline
+MyChron2Insta360 "...\Session_..._CSV" --detect-tilt                # just report how the logger sits
+MyChron2Insta360 "...\Session_..._CSV" --both --tilt                # level the IMU, angle from the data
+MyChron2Insta360 "...\Session_..._CSV" --both --tilt 13             # level it by a known 13 degrees
+MyChron2Insta360 "...\Session_..._CSV" --format telemetry-overlay --tilt   # one wide CSV for Telemetry Overlay
+MyChron2Insta360 "...\Session_..._CSV" --format gpx,fit,telemetry-overlay  # all three at once
 MyChron2Insta360 --help
 ```
 
@@ -144,7 +220,10 @@ MyChron2Insta360 --help
 | `--merge` | Merge all sessions into ONE output (default: one file per session) |
 | `-o, --out <file>` | Explicit output path, single output only (extension set per format) |
 | `--out-dir <folder>` | Write outputs into this folder (created if needed) |
-| `--format <gpx\|fit\|both>` | Output format(s). Default `gpx` (`--fit` / `--both` are shortcuts) |
+| `--format <list>` | Output format(s), comma separated: `gpx`, `fit`, `both`, `telemetry-overlay`. Default `gpx` |
+| `--to-rate <hz>` | Telemetry Overlay grid rate (default 50) |
+| `--no-to-invert-steering` | Keep the logged steering sign (default: negated, matching the gauge) |
+| `--to-invert-lateral` | Negate lateral g (default: off, the "seat of the pants" sense) |
 | `--gps10` | Use `_GPS.csv` (10 Hz) instead of `_GPS_o.csv` (25 Hz) |
 | `--hz <n>` | Downsample to n Hz (default: native rate) |
 | `--nudge <seconds>` | Shift every timestamp to fine-tune sync |
@@ -154,6 +233,8 @@ MyChron2Insta360 --help
 | `--trim` | Trim leading/trailing standstill per session (off by default) |
 | `--no-imu-csv` | Do not write the separate accel/gyro CSV (it is written by default) |
 | `--imu-hz <n>` | Downsample the IMU to n Hz (default: native, about 1000 Hz on Insta360) |
+| `--tilt [deg]` | Correct the mount tilt. No value (or `auto`) measures it; a number uses that angle |
+| `--detect-tilt` | Only measure and print the mount tilt, then exit. Writes nothing |
 | `-h, --help` | Show the built-in help |
 | `--version` | Show the version |
 
@@ -164,17 +245,56 @@ Then in the Insta360 app: **Dashboard, Data Source, Local Files, Import**.
 ```
 src/
   MyChron2Insta360.Core/   RaceStudioGpsCsv / RaceStudioImu / RaceStudioChannels (MyChron readers),
+                           RaceStudioChannelScan (discovers whatever channels a session has),
                            Insta360Trailer (native .insv/.lrv metadata reader),
                            ItowTime (GPS to UTC), Conversion (build/downsample),
-                           Imu (shared sample type), GpxWriter, FitWriter, ImuCsvWriter
+                           TiltCorrection (mount tilt), Imu (shared sample type),
+                           GpxWriter, FitWriter, ImuCsvWriter,
+                           TelemetryOverlayCsv + TelemetryOverlayAliases (merged AiM CSV)
   MyChron2Insta360.App/    single .exe: CLI (Cli.cs) + WinForms GUI (MainForm.cs)
+tests/                     xunit tests, including the Telemetry Overlay export end to end
+docs/                      TelemetryOverlay-CSV-Spec.md and the extracted channel alias table
 ```
+
+Run the tests with `dotnet test tests/MyChron2Insta360.Tests`.
 
 Notes: the original XRK file is a proprietary AiM binary, so this tool uses the documented CSV export
 instead of a native XRK reader. The Insta360 trailer reader is a clean-room implementation of the
 publicly documented format, with no external tool required; the layout was cross-checked against
 [telemetry-parser](https://github.com/AdrianEddy/telemetry-parser) and [ExifTool](https://exiftool.org/),
 and the output verified against ExifTool on real files.
+
+## Changes
+
+### 1.2.0
+
+Everything below landed in one release: 1.1.2 and 1.1.3 were built and tested but never published.
+
+- **Telemetry Overlay export.** Merges a RaceStudio session into one wide AiM-style CSV that
+  [Telemetry Overlay](https://goprotelemetryextractor.com/telemetry-overlay-gopro-gps) loads with its
+  gauges already bound. The channel list is discovered rather than hard-coded, so probes the reference
+  session never had (water temperature, EGT, lambda, brake pressure) come along too. Reached with
+  `--format telemetry-overlay` or the GUI tick box.
+- **Mount tilt correction.** A logger angled on the steering wheel keeps a slice of gravity in its
+  longitudinal channel; `--tilt` rotates the IMU so gravity sits back on the vertical axis, and the
+  angle can be measured from the data. `--detect-tilt` and the GUI's *Autodetect* button report it
+  without converting. The correction reaches GPX, FIT, the IMU CSV and the Telemetry Overlay export
+  alike.
+- **Fixed: a third of the gyro samples were stale.** Accelerometer and gyroscope are exported on time
+  grids about 1 ms apart, and the exact-timestamp join missed 32.3% of gyro samples, repeating the
+  previous one instead. Now joined by nearest timestamp: 99.99% of samples land within 10 ms, and the
+  repeat rate is 0.0%.
+- `--format` now composes, so `--format gpx,fit,telemetry-overlay` writes all three.
+- Numbers are accepted with either a dot or a comma, and printed with a dot. Previously `--tilt 20,0`
+  was read as 200 degrees.
+- The GUI window carries the new tilt and Telemetry Overlay controls, and the CLI prints degree signs
+  and arrows correctly instead of `?`.
+- Added a test suite (`dotnet test tests/MyChron2Insta360.Tests`) and
+  `docs/TelemetryOverlay-CSV-Spec.md`.
+
+### 1.1.1
+
+- Process a folder of Insta360 clips, in parallel, with optional merge.
 
 ## License
 

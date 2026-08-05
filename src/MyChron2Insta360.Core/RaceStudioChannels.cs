@@ -20,8 +20,21 @@ public static class RaceStudioChannels
     public static List<LapSplit> LoadLaps(string folder, DateTime? sessionStartUtc)
     {
         var laps = new List<LapSplit>();
+        if (sessionStartUtc is not DateTime start) return laps;
+        foreach (var (number, startS, durationS) in LoadLapsElapsed(folder))
+            laps.Add(new LapSplit { Number = number, StartUtc = start.AddSeconds(startS), DurationS = durationS });
+        return laps;
+    }
+
+    /// <summary>
+    /// Lap splits on the session's own elapsed-seconds base, which is what the Telemetry Overlay
+    /// beacon markers need. Works without a GPS clock.
+    /// </summary>
+    public static List<(int Number, double StartS, double DurationS)> LoadLapsElapsed(string folder)
+    {
+        var laps = new List<(int, double, double)>();
         string path = Path.Combine(folder, "_laps_and_splits.csv");
-        if (!File.Exists(path) || sessionStartUtc is not DateTime start) return laps;
+        if (!File.Exists(path)) return laps;
 
         int n = 0;
         foreach (var line in File.ReadLines(path))
@@ -32,7 +45,7 @@ public static class RaceStudioChannels
             if (!double.TryParse(f[3].Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out double startS)) continue;
             if (!double.TryParse(f[4].Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out double durS)) continue;
             if (durS <= 0) continue;
-            laps.Add(new LapSplit { Number = ++n, StartUtc = start.AddSeconds(startS), DurationS = durS });
+            laps.Add((++n, startS, durS));
         }
         return laps;
     }

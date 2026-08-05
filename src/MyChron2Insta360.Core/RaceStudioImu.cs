@@ -4,8 +4,9 @@ namespace MyChron2Insta360.Core;
 
 /// <summary>
 /// Reads the MyChron IMU from a RaceStudio "_CSV" folder: AccelerometerX/Y/Z.csv (g) and GyroX/Y/Z.csv
-/// (deg/s), each a per-channel `time,value` file. Accel and gyro can start at slightly different times,
-/// so gyro is matched to each accel sample by timestamp. Produces the same <see cref="ImuSample"/>
+/// (deg/s), each a per-channel `time,value` file. Accel and gyro start at slightly different times and
+/// drift against each other, so gyro is joined to each accel sample by nearest timestamp. Produces the
+/// same <see cref="ImuSample"/>
 /// (accel g, gyro deg/s) as the Insta360 source, so both write an identical IMU CSV.
 /// </summary>
 public static class RaceStudioImu
@@ -15,17 +16,24 @@ public static class RaceStudioImu
         var accel = ReadTriax(folder, "AccelerometerX.csv", "AccelerometerY.csv", "AccelerometerZ.csv");
         var gyro = ReadTriax(folder, "GyroX.csv", "GyroY.csv", "GyroZ.csv");
 
-        var gyroByKey = new Dictionary<long, (double x, double y, double z)>(gyro.Count);
-        foreach (var g in gyro) gyroByKey[Key(g.t)] = (g.x, g.y, g.z);
-
         var imu = new List<ImuSample>(Math.Max(accel.Count, gyro.Count));
         if (accel.Count > 0)
         {
-            (double x, double y, double z) lastG = default;
+            // RaceStudio writes each channel on its own time grid: gyro typically sits about 1 ms off
+            // the accel grid, and both jitter by a sample now and then. Matching timestamps exactly
+            // therefore misses roughly a third of the gyro samples and repeats the previous one in
+            // their place. Both lists are in time order, so walk them together and take the gyro
+            // sample nearest each accel sample.
+            int j = 0;
             foreach (var a in accel)
             {
-                if (gyroByKey.TryGetValue(Key(a.t), out var g)) lastG = g;
-                imu.Add(new ImuSample { ElapsedS = a.t, Ax = a.x, Ay = a.y, Az = a.z, Gx = lastG.x, Gy = lastG.y, Gz = lastG.z });
+                (double t, double x, double y, double z) g = default;
+                if (gyro.Count > 0)
+                {
+                    while (j + 1 < gyro.Count && Math.Abs(gyro[j + 1].t - a.t) <= Math.Abs(gyro[j].t - a.t)) j++;
+                    g = gyro[j];
+                }
+                imu.Add(new ImuSample { ElapsedS = a.t, Ax = a.x, Ay = a.y, Az = a.z, Gx = g.x, Gy = g.y, Gz = g.z });
             }
         }
         else
@@ -38,8 +46,6 @@ public static class RaceStudioImu
     /// <summary>True if the folder has any accelerometer/gyro channel files.</summary>
     public static bool HasImu(string folder) =>
         File.Exists(Path.Combine(folder, "AccelerometerX.csv")) || File.Exists(Path.Combine(folder, "GyroX.csv"));
-
-    private static long Key(double t) => (long)Math.Round(t * 1000.0); // align on the ~ms sample grid
 
     private static List<(double t, double x, double y, double z)> ReadTriax(string folder, string fx, string fy, string fz)
     {

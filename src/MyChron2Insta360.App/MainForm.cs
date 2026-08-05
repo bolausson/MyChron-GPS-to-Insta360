@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Globalization;
 using System.Windows.Forms;
 using MyChron2Insta360.Core;
 
@@ -21,8 +22,13 @@ public sealed class MainForm : Form
     private readonly CheckBox _gpx = new() { Text = "GPX", Checked = true };
     private readonly CheckBox _fit = new() { Text = "FIT", Checked = true };
     private readonly CheckBox _imuCsv = new() { Text = "IMU CSV", Checked = true };
+    private readonly CheckBox _toCsv = new() { Text = "Telemetry Overlay", Checked = false };
     private readonly Label _formatHelp = new() { AutoSize = false, ForeColor = Color.DimGray };
     private readonly NumericUpDown _imuHz = new() { Minimum = 0, Maximum = 1000, Increment = 10, Value = 0 };
+    private readonly CheckBox _tilt = new() { Text = "Correct mount tilt", Checked = false };
+    private readonly TextBox _tiltDeg = new() { PlaceholderText = "auto", TextAlign = HorizontalAlignment.Right };
+    private readonly Button _tiltDetect = new() { Text = "Autodetect" };
+    private readonly Label _tiltHelp = new() { AutoSize = false, ForeColor = Color.DimGray };
     private readonly CheckBox _merge = new() { Text = "Merge sessions into one file", Checked = false };
     private readonly CheckBox _trim = new() { Text = "Trim standstill at start / end", Checked = false };
     private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, BackColor = Color.White };
@@ -31,8 +37,8 @@ public sealed class MainForm : Form
     public MainForm(string[]? preload = null)
     {
         Text = "MyChron → Insta360";
-        ClientSize = new Size(640, 720);
-        MinimumSize = new Size(560, 520);
+        ClientSize = new Size(640, 788);
+        MinimumSize = new Size(560, 586);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9F);
         try { Icon = System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath!); } catch { /* keep default icon */ }
@@ -97,25 +103,48 @@ public sealed class MainForm : Form
         AddLabel("Output format:", x, y + 4, labelW);
         _gpx.SetBounds(ctrlX, y, 60, 24);
         _fit.SetBounds(ctrlX + 64, y, 60, 24);
-        _imuCsv.SetBounds(ctrlX + 128, y, 90, 24);
+        _imuCsv.SetBounds(ctrlX + 128, y, 84, 24);
+        _toCsv.SetBounds(ctrlX + 216, y, 140, 24);
         Controls.Add(_gpx);
         Controls.Add(_fit);
         Controls.Add(_imuCsv);
+        Controls.Add(_toCsv);
         y += 26;
-        _formatHelp.SetBounds(ctrlX, y, ctrlW, 52);
+        _formatHelp.SetBounds(ctrlX, y, ctrlW, 68);
         _formatHelp.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         _formatHelp.Text =
             "GPX: GPS track only (position, altitude, speed, time). Best for maps and Insta360.\r\n" +
             "FIT: GPS plus accelerometer/gyro, temperature and lap splits (where available).\r\n" +
-            "IMU CSV: accelerometer (g) and gyro (deg/s) per sample, for analysis in other apps.";
+            "IMU CSV: accelerometer (g) and gyro (deg/s) per sample, for analysis in other apps.\r\n" +
+            "Telemetry Overlay: one wide CSV with every logged channel (MyChron sessions only).";
         Controls.Add(_formatHelp);
-        y += 56;
+        y += 72;
 
         AddLabel("IMU rate (Hz):", x, y + 4, labelW);
         _imuHz.SetBounds(ctrlX, y, 90, 26);
         Controls.Add(_imuHz);
         AddLabel("0 = native (Insta360 is ~1000 Hz)", ctrlX + 104, y + 4, 320);
         y += 36;
+
+        // A logger angled on the steering wheel keeps a slice of gravity in its longitudinal channel.
+        // Levelling it makes the accelerometer read braking, cornering and bumps on the right axes.
+        AddLabel("Tilt correction:", x, y + 4, labelW);
+        _tilt.SetBounds(ctrlX, y + 2, 140, 22);
+        _tilt.CheckedChanged += (_, __) => UpdateTiltEnabled();
+        Controls.Add(_tilt);
+        _tiltDeg.SetBounds(ctrlX + 146, y, 56, 26);
+        Controls.Add(_tiltDeg);
+        AddLabel("°", ctrlX + 206, y + 4, 14);
+        _tiltDetect.SetBounds(ctrlX + 224, y - 1, 92, 28);
+        _tiltDetect.Click += async (_, __) => await DetectTiltAsync();
+        Controls.Add(_tiltDetect);
+        y += 28;
+        _tiltHelp.SetBounds(ctrlX, y, ctrlW, 16);
+        _tiltHelp.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+        _tiltHelp.Text = "leave the angle empty to measure it from the data during conversion";
+        Controls.Add(_tiltHelp);
+        UpdateTiltEnabled();
+        y += 24;
 
         _merge.SetBounds(ctrlX, y, 340, 24);
         _merge.CheckedChanged += (_, __) => UpdateResolved();
@@ -249,6 +278,82 @@ public sealed class MainForm : Form
         _resolved.Text = $"→ {total} session(s) found ({mode})" + (bad > 0 ? $" , {bad} item(s) unreadable" : "");
     }
 
+    /// <summary>
+    /// Merge one session into a single wide CSV for Telemetry Overlay. The IMU is passed in already
+    /// levelled, so the tilt correction reaches this export just as it reaches GPX and FIT. Returns
+    /// the file written.
+    /// </summary>
+    private string WriteTelemetryOverlay(GpsSession s, string folder, IReadOnlyList<ImuSample> imu,
+                                         string basePath, DateTime? startUtc)
+    {
+        var channels = RaceStudioChannelScan.Discover(folder);
+        var laps = RaceStudioChannels.LoadLapsElapsed(folder);
+        var opt = new TelemetryOverlayOptions
+        {
+            SessionName = s.Name,
+            StartLocal = startUtc is DateTime utc
+                ? TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), TimeZoneInfo.Local)
+                : null,
+        };
+        string path = basePath + "_TelemetryOverlay.csv";
+        Log($"  Telemetry Overlay CSV, {channels.Count} channel file(s) found:");
+        TelemetryOverlayCsv.Write(path, s, imu, channels, laps, opt, Log);
+        return path;
+    }
+
+    private void UpdateTiltEnabled()
+    {
+        _tiltDeg.Enabled = _tilt.Checked;
+        _tiltDetect.Enabled = _tilt.Checked;
+        _tiltHelp.Enabled = _tilt.Checked;
+    }
+
+    /// <summary>Read the tilt controls. Null means the typed angle is not a number.</summary>
+    private TiltPlan? BuildTiltPlan()
+    {
+        string typed = _tiltDeg.Text.Trim();
+        if (!_tilt.Checked || typed.Length == 0) return new TiltPlan { Enabled = _tilt.Checked };
+        double? manual = Cli.ParseD(typed);
+        return manual is null ? null : new TiltPlan { Enabled = true, ManualDeg = manual };
+    }
+
+    /// <summary>Measure the mount tilt from the current inputs and fill it into the angle field.</summary>
+    private async Task DetectTiltAsync()
+    {
+        var inputs = InputPaths();
+        if (inputs.Count == 0)
+        {
+            MessageBox.Show(this, "Add an input first: the tilt is measured from its accelerometer data.",
+                            Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        _tiltDetect.Enabled = false;
+        Log("Measuring the mount tilt …");
+        try
+        {
+            var found = await Task.Run(() =>
+            {
+                var e = TiltPlan.DetectFrom(inputs, out string s, out string? w);
+                return (Est: e, Source: s, Why: w);
+            });
+            if (found.Est is null)
+            {
+                Log($"  Could not measure the tilt: {found.Why}.");
+                MessageBox.Show(this, $"Could not measure the tilt: {found.Why}.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            _tiltDeg.Text = found.Est.AngleDeg.ToString("0.0", CultureInfo.InvariantCulture);
+            Log($"Mount tilt measured from {found.Source}:");
+            foreach (var line in TiltPlan.Describe(found.Est)) Log(line);
+        }
+        catch (Exception ex)
+        {
+            Log("ERROR: " + ex.Message);
+            MessageBox.Show(this, ex.Message, "Tilt detection failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally { _tiltDetect.Enabled = _tilt.Checked; }
+    }
+
     private void BrowseOutputFolder()
     {
         using var dlg = new FolderBrowserDialog { Description = "Pick the output folder for the GPX/FIT files" };
@@ -272,7 +377,8 @@ public sealed class MainForm : Form
     }
 
     /// <summary>Convert Insta360 clips via the native trailer parser, individually or merged.</summary>
-    private async Task ConvertInsta360Async(List<Insta360Clip> clips, bool gpx, bool fit, bool imuCsv, double imuHz, bool merge)
+    private async Task ConvertInsta360Async(List<Insta360Clip> clips, bool gpx, bool fit, bool imuCsv, double imuHz,
+                                            bool merge, TiltPlan tilt)
     {
         string? outDir = string.IsNullOrWhiteSpace(_outDir.Text) ? null : _outDir.Text.Trim();
         _convert.Enabled = false;
@@ -311,6 +417,7 @@ public sealed class MainForm : Form
                 if (loaded.Count == 0) return files;
                 loaded.Sort((a, b) => (a.Tel.Gps.Count > 0 ? a.Tel.Gps[0].Utc : DateTime.MaxValue)
                                .CompareTo(b.Tel.Gps.Count > 0 ? b.Tel.Gps[0].Utc : DateTime.MaxValue));
+                foreach (var l in loaded) tilt.ApplyTo(l.Tel.Imu, Log);
 
                 if (merge && loaded.Count > 1)
                 {
@@ -388,19 +495,30 @@ public sealed class MainForm : Form
             MessageBox.Show(this, "Add at least one RaceStudio '_CSV' folder (or a parent folder) or a _GPS csv.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
-        bool gpx = _gpx.Checked, fit = _fit.Checked, imuCsv = _imuCsv.Checked;
-        if (!gpx && !fit && !imuCsv)
+        bool gpx = _gpx.Checked, fit = _fit.Checked, imuCsv = _imuCsv.Checked, toCsv = _toCsv.Checked;
+        if (!gpx && !fit && !imuCsv && !toCsv)
         {
-            MessageBox.Show(this, "Select at least one output (GPX, FIT or IMU CSV).", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, "Select at least one output (GPX, FIT, IMU CSV or Telemetry Overlay).", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
         double imuHz = (double)_imuHz.Value;
+
+        var tiltPlan = BuildTiltPlan();
+        if (tiltPlan is null)
+        {
+            MessageBox.Show(this, $"'{_tiltDeg.Text}' is not a valid tilt angle.\n\nLeave the field empty to measure it from the data.",
+                            Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
 
         // Insta360 video input (files or folders holding them) takes the native trailer path.
         var clips = Insta360Trailer.DiscoverClips(inputs);
         if (clips.Count > 0)
         {
-            await ConvertInsta360Async(clips, gpx, fit, imuCsv, imuHz, _merge.Checked);
+            // That export merges a RaceStudio channel folder and uses the MyChron axis frame, so it
+            // does not apply to camera telemetry.
+            if (toCsv) Log("Note: the Telemetry Overlay CSV is a MyChron export; skipping it for Insta360 input.");
+            await ConvertInsta360Async(clips, gpx, fit, imuCsv, imuHz, _merge.Checked, tiltPlan);
             return;
         }
 
@@ -440,8 +558,14 @@ public sealed class MainForm : Form
                     var allImu = new List<ImuSample>();
                     foreach (var s in sessions)
                     {
-                        var im = RaceStudioImu.Load(Path.GetDirectoryName(s.SourceFile)!);
+                        string sessionFolder = Path.GetDirectoryName(s.SourceFile)!;
+                        var im = RaceStudioImu.Load(sessionFolder);
+                        tiltPlan.ApplyTo(im, Log);
                         if (imuHz > 0) im = ImuCsvWriter.Downsample(im, imuHz);
+                        // The AiM container describes one session, so this export stays per session
+                        // even when the GPX and FIT are merged.
+                        if (toCsv)
+                            written.Add(WriteTelemetryOverlay(s, sessionFolder, im, Path.Combine(dir, DirName(sessionFolder)), opt.StartUtc));
                         allImu.AddRange(im);
                     }
                     if (gpx) { var p = basePath + ".gpx"; GpxWriter.Write(p, segs, name); written.Add(p); }
@@ -467,6 +591,7 @@ public sealed class MainForm : Form
                         // IMU, laps and temperature ride along into the FIT and the IMU CSV.
                         DateTime? startUtc = opt.StartUtc;
                         var imu = RaceStudioImu.Load(folder);
+                        tiltPlan.ApplyTo(imu, Log);   // level before any downsample, so every output agrees
                         if (imuHz > 0) imu = ImuCsvWriter.Downsample(imu, imuHz);
                         if (startUtc is DateTime su0) foreach (var v in imu) v.Utc = su0.AddSeconds(v.ElapsedS);
                         var ex = new FitWriter.Extras
@@ -479,6 +604,8 @@ public sealed class MainForm : Form
                         if (gpx) { var p = basePath + ".gpx"; GpxWriter.Write(p, segs, s.Name); written.Add(p); }
                         if (fit) { var p = basePath + ".fit"; FitWriter.Write(p, segs, s.Name, ex); written.Add(p); }
                         if (imuCsv && imu.Count > 0) { var p = basePath + "_imu.csv"; ImuCsvWriter.Write(p, imu); written.Add(p); }
+                        // Same levelled IMU stream the FIT and the IMU CSV get, never re-read from disk.
+                        if (toCsv) written.Add(WriteTelemetryOverlay(s, folder, imu, basePath, startUtc));
                     }
                 }
                 return (count: sessions.Count, sessionLines, written, totalPoints, merged);

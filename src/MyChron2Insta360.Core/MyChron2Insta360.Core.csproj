@@ -11,4 +11,11 @@
     <PackageReference Include="Garmin.FIT.Sdk" Version="21.205.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Telemetry Overlay's channel alias table, shipped inside the single-file exe so the lookup
+         works without the repo. The checked-in text file stays the single source of truth. -->
+    <EmbeddedResource Include="..\..\docs\reference\telemetry-overlay-alias-table.txt"
+                      LogicalName="TelemetryOverlayAliases.txt" />
+  </ItemGroup>
+
 </Project>
