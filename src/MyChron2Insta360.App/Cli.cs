@@ -58,6 +58,7 @@ internal static class Cli
             double imuHz = 0; // 0 = native rate
             bool tilt = false, detectTilt = false;
             double? tiltDeg = null; // null with tilt on = measure it from the data
+            bool noXrk = false, verifyXrk = false;
             double toRate = 50;
             bool toInvertSteering = true;   // Telemetry Overlay renders steering mirrored
             bool toInvertLateral = false;   // off keeps the "seat of the pants" sense
@@ -93,6 +94,9 @@ internal static class Cli
                         }
                         break;
                     case "--detect-tilt": detectTilt = true; break;
+                    case "--xrk-dll": XrkReader.SetLibraryFolder(Next()); break;
+                    case "--no-xrk": noXrk = true; break;
+                    case "--verify-xrk": verifyXrk = true; break;
                     case "--to-rate": toRate = ParseD(Next()) ?? 50; break;
                     case "--to-invert-steering": toInvertSteering = true; break;
                     case "--no-to-invert-steering": toInvertSteering = false; break;
@@ -110,6 +114,8 @@ internal static class Cli
                 if (!File.Exists(inp) && !Directory.Exists(inp)) { Console.Error.WriteLine($"Error: input not found: {inp}"); return 2; }
             var formats = ParseFormats(format, out string? formatError);
             if (formatError is not null) { Console.Error.WriteLine($"Error: {formatError}"); return 2; }
+
+            if (verifyXrk) return VerifyXrk(inputs);
 
             if (detectTilt)
             {
@@ -144,39 +150,39 @@ internal static class Cli
                 return RunInsta360(clips, output, outDir, formats, writeImuCsv, imuHz, merge, tiltPlan);
             }
 
-            var sessions = RaceStudioGpsCsv.LoadAll(inputs, gps10);
-            Console.WriteLine($"Found {sessions.Count} session(s):");
-            foreach (var s in sessions)
-                Console.WriteLine($"  {DirName(Path.GetDirectoryName(s.SourceFile)!)}  ({s.Samples.Count} fixes, {s.NativeHz:0.#} Hz)");
+            var sources = MyChronSources.LoadAll(inputs, gps10, preferXrk: !noXrk);
+            var sessions = sources.Select(s => s.Gps).ToList();
+            Console.WriteLine($"Found {sources.Count} session(s):");
+            foreach (var s in sources) Console.WriteLine("  " + s.Describe());
+            if (sources.Any(s => s.FromXrk)) Console.WriteLine($"  (xrk read via {XrkReader.LibraryPath})");
             if (outDir is not null) Directory.CreateDirectory(outDir);
 
-            if (merge && sessions.Count > 1)
+            if (merge && sources.Count > 1)
             {
                 Console.WriteLine("Mode: MERGE → one output file.");
                 var segs = TrackBuilder.Build(sessions, opt);
                 ReportBuild(opt);
                 string primary = inputs[0];
                 string baseName = MergedBaseName(opt);
-                string dir = outDir ?? (Directory.Exists(primary) ? primary : Path.GetDirectoryName(sessions[0].SourceFile)!);
-                string name = $"{baseName} ({sessions.Count} sessions)";
+                string dir = outDir ?? (Directory.Exists(primary) ? primary : Path.GetDirectoryName(sources[0].Gps.SourceFile)!);
+                string name = $"{baseName} ({sources.Count} sessions)";
                 string mergeBase = output ?? Path.Combine(dir, baseName);
                 WriteJob(segs, mergeBase, name, formats);
                 bool wantTo = formats.HasFlag(Outputs.TelemetryOverlay);
                 if (writeImuCsv || wantTo)
                 {
                     var all = new List<ImuSample>();
-                    foreach (var s in sessions)
+                    foreach (var src in sources)
                     {
-                        string sessionFolder = Path.GetDirectoryName(s.SourceFile)!;
-                        var im = RaceStudioImu.Load(sessionFolder);
+                        var im = src.LoadImu();
                         tiltPlan.ApplyTo(im, Console.WriteLine);
                         if (imuHz > 0) im = ImuCsvWriter.Downsample(im, imuHz);
                         // The AiM container describes one session, so this export stays per session
                         // even when the GPX and FIT are merged.
                         if (wantTo)
-                            WriteTelemetryOverlay(s, opt, im, Path.Combine(dir, DirName(sessionFolder)),
+                            WriteTelemetryOverlay(src, opt, im, Path.Combine(dir, src.BaseName),
                                                   toRate, toInvertSteering, toInvertLateral);
-                        if (SessionStartUtc(s, opt) is DateTime su) foreach (var x in im) x.Utc = su.AddSeconds(x.ElapsedS);
+                        if (SessionStartUtc(src.Gps, opt) is DateTime su) foreach (var x in im) x.Utc = su.AddSeconds(x.ElapsedS);
                         all.AddRange(im);
                     }
                     if (writeImuCsv && all.Count > 0)
@@ -190,22 +196,21 @@ internal static class Cli
             }
             else
             {
-                if (sessions.Count > 1) Console.WriteLine("Mode: individual → one output file per session (use --merge to combine).");
-                foreach (var s in sessions)
+                if (sources.Count > 1) Console.WriteLine("Mode: individual → one output file per session (use --merge to combine).");
+                foreach (var src in sources)
                 {
-                    var segs = TrackBuilder.Build(new[] { s }, opt);
-                    string folder = Path.GetDirectoryName(s.SourceFile)!;
-                    string baseName = DirName(folder);
-                    string dir = outDir ?? folder;
-                    string basePath = (output is not null && sessions.Count == 1) ? output : Path.Combine(dir, baseName);
+                    var segs = TrackBuilder.Build(new[] { src.Gps }, opt);
+                    string baseName = src.BaseName;
+                    string dir = outDir ?? (src.FromXrk ? Path.GetDirectoryName(src.Path)! : src.Path);
+                    string basePath = (output is not null && sources.Count == 1) ? output : Path.Combine(dir, baseName);
                     Console.WriteLine($"[{baseName}] {opt.TotalPoints} pts @ {opt.EffectiveHz:0.#} Hz" +
                                       (opt.StartUtc is DateTime t0 ? $"  {t0:HH:mm:ss}Z.." + (opt.EndUtc is DateTime t1 ? $"{t1:HH:mm:ss}Z" : "") : ""));
-                    var extras = LoadMyChronExtras(s, opt, imuHz, tiltPlan, out var imu);
-                    WriteJob(segs, basePath, s.Name, formats, extras);
+                    var extras = LoadMyChronExtras(src, opt, imuHz, tiltPlan, out var imu);
+                    WriteJob(segs, basePath, src.Gps.Name, formats, extras);
                     if (extras.Laps is { Count: > 0 } lapList) Console.WriteLine($"  {lapList.Count} lap(s) from the logger.");
                     // Same levelled IMU stream the FIT and the IMU CSV get, never re-read from disk.
                     if (formats.HasFlag(Outputs.TelemetryOverlay))
-                        WriteTelemetryOverlay(s, opt, imu, basePath, toRate, toInvertSteering, toInvertLateral);
+                        WriteTelemetryOverlay(src, opt, imu, basePath, toRate, toInvertSteering, toInvertLateral);
                     if (writeImuCsv && imu.Count > 0)
                     {
                         string csv = basePath + "_imu.csv";
@@ -224,22 +229,174 @@ internal static class Cli
     }
 
     /// <summary>Load a MyChron session's IMU, laps and temperature, all stamped to absolute UTC.</summary>
-    private static FitWriter.Extras LoadMyChronExtras(GpsSession s, ConversionOptions opt, double imuHz,
+    private static FitWriter.Extras LoadMyChronExtras(MyChronSource src, ConversionOptions opt, double imuHz,
                                                       TiltPlan tilt, out List<ImuSample> imu)
     {
-        string folder = Path.GetDirectoryName(s.SourceFile)!;
-        DateTime? startUtc = SessionStartUtc(s, opt);
-        imu = RaceStudioImu.Load(folder);
+        DateTime? startUtc = SessionStartUtc(src.Gps, opt);
+        imu = src.LoadImu();
         tilt.ApplyTo(imu, Console.WriteLine);   // level before any downsample, so every output agrees
         if (imuHz > 0) imu = ImuCsvWriter.Downsample(imu, imuHz);
         if (startUtc is DateTime su)
             foreach (var x in imu) x.Utc = su.AddSeconds(x.ElapsedS);
+
+        var laps = new List<LapSplit>();
+        if (startUtc is DateTime lapStart)
+            foreach (var (number, start, duration) in src.LoadLaps())
+                laps.Add(new LapSplit { Number = number, StartUtc = lapStart.AddSeconds(start), DurationS = duration });
+
         return new FitWriter.Extras
         {
             Imu = imu.Count > 0 ? imu : null,
-            Laps = RaceStudioChannels.LoadLaps(folder, startUtc),
-            Temperature = RaceStudioChannels.LoadTemperature(folder, startUtc),
+            Laps = laps,
+            Temperature = MyChronSources.Temperature(src.LoadChannels(), startUtc),
         };
+    }
+
+    /// <summary>
+    /// Read each .xrk three ways, our own parser, AiM's library and the RaceStudio CSV export, and
+    /// report where they disagree. The CSV rounds on the way out, so it is compared with a tolerance;
+    /// our parser and AiM's library should agree exactly.
+    /// </summary>
+    private static int VerifyXrk(List<string> inputs)
+    {
+        var files = MyChronSources.Discover(inputs).Where(c => c.IsXrk).Select(c => c.Path).ToList();
+        if (files.Count == 0) { Console.Error.WriteLine("Error: no .xrk/.xrz found in the input(s)."); return 2; }
+
+        bool allOk = true;
+        foreach (var file in files)
+        {
+            Console.WriteLine($"\n{Path.GetFileName(file)}");
+            var mine = XrkReader.Load(file);
+            Console.WriteLine($"  ours : {mine.Gps.Samples.Count} GPS, {mine.Imu.Count} IMU, " +
+                              $"{mine.Channels.Count} channel(s), {mine.Laps.Count} lap(s)  [{mine.Info.Describe()}]");
+            if (mine.Info.TotalBytes > 0)
+                Console.WriteLine($"         stepped over {mine.Info.UnreadBytes * 100.0 / mine.Info.TotalBytes:0.#}% of the file " +
+                                  "(vendor blocks this tool has no use for)");
+
+            XrkData? dll = null;
+            if (XrkReader.DllAvailable)
+            {
+                dll = XrkReader.LoadViaDll(file);
+                Console.WriteLine($"  AiM  : {dll.Gps.Samples.Count} GPS, {dll.Imu.Count} IMU, " +
+                                  $"{dll.Channels.Count} channel(s), {dll.Laps.Count} lap(s)");
+            }
+            else Console.WriteLine($"  AiM  : library not present, skipping that comparison ({XrkReader.DllUnavailableReason})");
+
+            string csvFolder = Path.Combine(Path.GetDirectoryName(file)!, Path.GetFileNameWithoutExtension(file) + "_CSV");
+            var csv = Directory.Exists(csvFolder) ? RaceStudioChannelScan.Discover(csvFolder) : null;
+            Console.WriteLine(csv is null ? "  CSV  : no _CSV export beside it, skipping that comparison"
+                                          : $"  CSV  : {csv.Count} channel file(s) in {Path.GetFileName(csvFolder)}");
+
+            if (dll is not null) allOk &= CompareToDll(mine, dll);
+            if (csv is not null) CompareToCsv(mine, csv);
+        }
+
+        Console.WriteLine(allOk ? "\nOur parser matches AiM's library." : "\nDifferences found, see above.");
+        return allOk ? 0 : 1;
+    }
+
+    private static bool CompareToDll(XrkData mine, XrkData dll)
+    {
+        bool ok = true;
+        Console.WriteLine("\n  vs AiM's library (these should agree exactly):");
+        Console.WriteLine($"    {"channel",-22} {"count",8} {"max |dt| s",14} {"max |dv|",14}");
+
+        foreach (var a in mine.Channels)
+        {
+            var b = dll.Channels.FirstOrDefault(c => c.Name == a.Name);
+            if (b is null)
+            {
+                // Not a mismatch: AiM's library hides some channels the logger really recorded.
+                Console.WriteLine($"    {a.Name,-22} {a.Values.Count,8} {"",14} {"",14}  present here, not exposed by AiM");
+                continue;
+            }
+            ok &= Row(a.Name, a.Times, a.Values, b.Times, b.Values);
+        }
+        ok &= Row("IMU accel X", mine.Imu.Select(s => s.ElapsedS).ToList(), mine.Imu.Select(s => s.Ax).ToList(),
+                  dll.Imu.Select(s => s.ElapsedS).ToList(), dll.Imu.Select(s => s.Ax).ToList());
+        ok &= Row("IMU gyro Z", mine.Imu.Select(s => s.ElapsedS).ToList(), mine.Imu.Select(s => s.Gz).ToList(),
+                  dll.Imu.Select(s => s.ElapsedS).ToList(), dll.Imu.Select(s => s.Gz).ToList());
+
+        var mg = mine.Gps.Samples; var dg = dll.Gps.Samples;
+        ok &= Row("GPS latitude", mg.Select(s => s.TimeRel).ToList(), mg.Select(s => s.Lat).ToList(),
+                  dg.Select(s => s.TimeRel).ToList(), dg.Select(s => s.Lat).ToList(), 1e-9);
+        ok &= Row("GPS longitude", mg.Select(s => s.TimeRel).ToList(), mg.Select(s => s.Lon).ToList(),
+                  dg.Select(s => s.TimeRel).ToList(), dg.Select(s => s.Lon).ToList(), 1e-9);
+        ok &= Row("GPS altitude", mg.Select(s => s.TimeRel).ToList(), mg.Select(s => s.Alt).ToList(),
+                  dg.Select(s => s.TimeRel).ToList(), dg.Select(s => s.Alt).ToList(), 1e-6);
+        ok &= Row("GPS speed", mg.Select(s => s.TimeRel).ToList(), mg.Select(s => s.SpeedMs).ToList(),
+                  dg.Select(s => s.TimeRel).ToList(), dg.Select(s => s.SpeedMs).ToList());
+        ok &= Row("GPS iTOW", mg.Select(s => s.TimeRel).ToList(), mg.Select(s => s.ItowMs).ToList(),
+                  dg.Select(s => s.TimeRel).ToList(), dg.Select(s => s.ItowMs).ToList());
+
+        bool laps = mine.Laps.Count == dll.Laps.Count;
+        double lapDiff = 0;
+        for (int i = 0; i < Math.Min(mine.Laps.Count, dll.Laps.Count); i++)
+            lapDiff = Math.Max(lapDiff, Math.Max(Math.Abs(mine.Laps[i].StartS - dll.Laps[i].StartS),
+                                                 Math.Abs(mine.Laps[i].DurationS - dll.Laps[i].DurationS)));
+        Console.WriteLine($"    {"laps",-22} {mine.Laps.Count,8} {"",14} {lapDiff,14:0.000000}  {(laps && lapDiff < 1e-6 ? "OK" : "CHECK")}");
+        if (mine.Info.GpsWeek != dll.Info.GpsWeek)
+        { Console.WriteLine($"    GPS week differs: {mine.Info.GpsWeek} vs {dll.Info.GpsWeek}"); ok = false; }
+        return ok && laps && lapDiff < 1e-6;
+    }
+
+    private static bool Row(string label, List<double> at, List<double> av, List<double> bt, List<double> bv,
+                            double tol = 1e-6)
+    {
+        int n = Math.Min(av.Count, bv.Count);
+        double dt = 0, dv = 0;
+        for (int i = 0; i < n; i++)
+        {
+            dt = Math.Max(dt, Math.Abs(at[i] - bt[i]));
+            dv = Math.Max(dv, Math.Abs(av[i] - bv[i]));
+        }
+        bool ok = av.Count == bv.Count && dt < 1e-9 && dv <= tol;
+        Console.WriteLine($"    {label,-22} {av.Count,8} {dt,14:0.000000000} {dv,14:0.000000000}  " +
+                          (av.Count != bv.Count ? $"COUNT {av.Count} vs {bv.Count}" : ok ? "OK" : "CHECK"));
+        return ok;
+    }
+
+    /// <summary>The CSV export rounds, so agreement is only expected to its own precision.</summary>
+    private static void CompareToCsv(XrkData mine, List<ChannelSeries> csv)
+    {
+        Console.WriteLine("\n  vs the RaceStudio CSV export (that export rounds, so a small difference is expected):");
+        foreach (var c in csv.OrderBy(c => c.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            List<double> times, values;
+            if (RaceStudioChannelScan.IsImuChannel(c.Name))
+            {
+                times = mine.Imu.Select(s => s.ElapsedS).ToList();
+                values = c.Name.ToLowerInvariant() switch
+                {
+                    "accelerometerx" => mine.Imu.Select(s => s.Ax).ToList(),
+                    "accelerometery" => mine.Imu.Select(s => s.Ay).ToList(),
+                    "accelerometerz" => mine.Imu.Select(s => s.Az).ToList(),
+                    "gyrox" => mine.Imu.Select(s => s.Gx).ToList(),
+                    "gyroy" => mine.Imu.Select(s => s.Gy).ToList(),
+                    _ => mine.Imu.Select(s => s.Gz).ToList(),
+                };
+            }
+            else
+            {
+                var mineCh = mine.Channels.FirstOrDefault(x => x.Name == c.Name);
+                if (mineCh is null) { Console.WriteLine($"    {c.Name,-22} not produced by our parser"); continue; }
+                times = mineCh.Times; values = mineCh.Values;
+            }
+
+            // Match on timestamp rather than position: the IMU stream carries the gyro re-timed onto
+            // the accelerometer grid, so the two lists are not index-for-index comparable.
+            double dt = 0, dv = 0;
+            int j = 0;
+            for (int i = 0; i < values.Count && c.Times.Count > 0; i++)
+            {
+                while (j + 1 < c.Times.Count && Math.Abs(c.Times[j + 1] - times[i]) <= Math.Abs(c.Times[j] - times[i])) j++;
+                dt = Math.Max(dt, Math.Abs(times[i] - c.Times[j]));
+                dv = Math.Max(dv, Math.Abs(values[i] - c.Values[j]));
+            }
+            string verdict = dv <= 0.0500001 ? "within the CSV's rounding" : "CHECK";
+            string counts = values.Count == c.Values.Count ? $"{values.Count}" : $"{values.Count}/{c.Values.Count}";
+            Console.WriteLine($"    {c.Name,-22} {counts,12} {dt,14:0.000000000} {dv,14:0.000000000}  {verdict}");
+        }
     }
 
     /// <summary>
@@ -247,36 +404,43 @@ internal static class Cli
     /// levelled from <see cref="LoadMyChronExtras"/>; the other channels are discovered in the folder,
     /// whatever they happen to be.
     /// </summary>
-    private static void WriteTelemetryOverlay(GpsSession s, ConversionOptions opt, IReadOnlyList<ImuSample> imu,
+    private static void WriteTelemetryOverlay(MyChronSource src, ConversionOptions opt, IReadOnlyList<ImuSample> imu,
                                               string basePath, double rate, bool invertSteering, bool invertLateral)
     {
-        string folder = Path.GetDirectoryName(s.SourceFile)!;
-        var channels = RaceStudioChannelScan.Discover(folder);
-        var laps = RaceStudioChannels.LoadLapsElapsed(folder);
+        var channels = src.LoadChannels();
+        var laps = src.LoadLaps();
         var toOpt = new TelemetryOverlayOptions
         {
             RateHz = rate,
             InvertSteering = invertSteering,
             InvertLateral = invertLateral,
-            SessionName = s.Name,
-            StartLocal = SessionStartUtc(s, opt) is DateTime utc
+            // An xrk knows the track, racer and championship; a CSV export does not.
+            SessionName = src.Info?.Track is { Length: > 0 } track ? track : src.Gps.Name,
+            Racer = src.Info?.Racer ?? "",
+            Vehicle = src.Info?.Vehicle ?? "",
+            Championship = src.Info?.Championship ?? "",
+            StartLocal = SessionStartUtc(src.Gps, opt) is DateTime utc
                 ? TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), TimeZoneInfo.Local)
-                : null,
+                : src.Info?.StartLocal,
         };
 
         string path = basePath + "_TelemetryOverlay.csv";
-        Console.WriteLine($"  Telemetry Overlay CSV, {channels.Count} channel file(s) found:");
-        TelemetryOverlayCsv.Write(path, s, imu, channels, laps, toOpt, Console.WriteLine);
+        Console.WriteLine($"  Telemetry Overlay CSV, {channels.Count} channel(s) found:");
+        TelemetryOverlayCsv.Write(path, src.Gps, imu, channels, laps, toOpt, Console.WriteLine);
         Console.WriteLine($"Wrote {path}");
     }
 
     private static DateTime? SessionStartUtc(GpsSession s, ConversionOptions opt)
     {
+        // An xrk carries the GPS week, which fixes the instant without any calendar hint.
+        int? week = opt.DateOverrideUtc is null ? s.GpsWeek : null;
         DateTime? dateHint = opt.DateOverrideUtc ?? s.DateHint;
-        if (dateHint is null) return null;
+        if (week is null && dateHint is null) return null;
         foreach (var g in s.Samples)
             if (!double.IsNaN(g.ItowMs) && g.ItowMs > 0)
-                return ItowTime.ToUtc(g.ItowMs, dateHint.Value, opt.LeapSeconds).AddSeconds(-g.TimeRel);
+                return (week is int w ? ItowTime.FromWeek(w, g.ItowMs, opt.LeapSeconds)
+                                      : ItowTime.ToUtc(g.ItowMs, dateHint!.Value, opt.LeapSeconds))
+                       .AddSeconds(-g.TimeRel);
         return null;
     }
 
@@ -474,6 +638,8 @@ internal static class Cli
 $@"MyChron2Insta360 {AppInfo.Version} - convert RaceStudio3 GPS CSV exports to GPX/FIT for the Insta360 Stats Dashboard.
 
 Inputs (auto-detected):
+  * A MyChron '.xrk' or '.xrz' logger file, read directly, no CSV export needed and nothing to
+    install. Use --verify-xrk to check that reader against AiM's own library and the CSV export.
   * RaceStudio '..._CSV' folder(s), a PARENT folder holding several, or a _GPS_o.csv / _GPS.csv.
     Each session becomes its own output file; --merge combines them onto one timeline via GPS 'itow'.
   * An Insta360 video (.insv / .lrv) recorded with a GPS remote or the phone app connected.
@@ -496,7 +662,11 @@ Options:
   --out-dir <folder>        Write outputs into this folder (created if needed).
   --format <list>           Output format(s), comma separated: gpx, fit, both, telemetry-overlay.
                             Default gpx. (--fit / --both are shortcuts.)
-  --gps10                   Use _GPS.csv (10 Hz) instead of _GPS_o.csv (25 Hz).
+  --gps10                   Use _GPS.csv (10 Hz) instead of _GPS_o.csv (25 Hz). CSV exports only.
+  --no-xrk                  Ignore .xrk/.xrz and use the RaceStudio CSV export instead.
+  --verify-xrk              Read an .xrk with this tool, with AiM's library and from the CSV export,
+                            report every difference, then exit. Writes nothing.
+  --xrk-dll <folder>        Where AiM's library sits. Only --verify-xrk uses it.
   --hz <n>                  Downsample to n Hz. Default: keep the native rate.
   --nudge <seconds>         Add seconds to every timestamp (fine sync tuning).
   --max-accuracy <m>        Drop fixes with reported accuracy worse than m metres (default: keep all).

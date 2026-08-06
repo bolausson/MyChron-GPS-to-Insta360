@@ -15,6 +15,8 @@ public sealed class TelemetryOverlayOptions
     public bool InvertLateral = false;
 
     public string SessionName = "";
+    /// <summary>Preamble fields. An xrk supplies these; a CSV export does not.</summary>
+    public string Racer = "", Vehicle = "", Championship = "";
     public DateTime? StartLocal;
 }
 
@@ -93,7 +95,9 @@ public static class TelemetryOverlayCsv
         if (fromImu.Count > 0)
             log?.Invoke($"    {string.Join(", ", fromImu)}: taken from the levelled IMU stream, not re-read");
 
-        foreach (var ch in channels)
+        // Sorted by name so an xrk and a CSV export of the same session produce the same column order,
+        // whatever order the source happened to hand them over in.
+        foreach (var ch in channels.OrderBy(c => c.Name, StringComparer.OrdinalIgnoreCase))
         {
             if (RaceStudioChannelScan.IsImuChannel(ch.Name)) continue;   // comes from the levelled stream
 
@@ -192,9 +196,9 @@ public static class TelemetryOverlayCsv
 
         w.WriteLine(Row("Format", "AiM CSV File"));
         w.WriteLine(Row("Session", opt.SessionName));
-        w.WriteLine(Row("Vehicle", ""));
-        w.WriteLine(Row("Racer", ""));
-        w.WriteLine(Row("Championship", ""));
+        w.WriteLine(Row("Vehicle", opt.Vehicle));
+        w.WriteLine(Row("Racer", opt.Racer));
+        w.WriteLine(Row("Championship", opt.Championship));
         w.WriteLine(Row("Comment", ""));
         w.WriteLine(Row("Date", date));
         w.WriteLine(Row("Time", time));

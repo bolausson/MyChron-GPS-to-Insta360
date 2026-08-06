@@ -4,15 +4,19 @@
 
 **Vibe coded!**
 
-Convert **RaceStudio3 GPS CSV exports** (from **MyChron** GoKart lap timers) into **GPX** and **FIT**
-files that the **Insta360 app / Insta360 Studio "Stats Dashboard"** can overlay onto your action-cam
-video: speed, altitude, distance, gradient and a track map, all synced automatically to the footage.
+Convert **MyChron** GoKart lap timer sessions into **GPX** and **FIT** files that the **Insta360 app /
+Insta360 Studio "Stats Dashboard"** can overlay onto your action-cam video: speed, altitude, distance,
+gradient and a track map, all synced automatically to the footage. It also writes a merged CSV for
+**Telemetry Overlay**.
+
+Drop a RaceStudio **`.xrk`** or **`.xrz`** straight in. Nothing needs exporting first, and there is
+nothing extra to install: the logger format is read by the tool itself.
 
 It also works the other way round: point it at an **Insta360 video** (`.insv` / `.lrv`) and it extracts
 the **GPS and IMU** recorded by the camera into GPX, FIT and CSV for use in other apps.
 
-A single Windows `.exe`, with no runtime to install. **Drag the export folder onto it**, or
-**double-click** to pick it, or drive it from the **command line**.
+A single Windows `.exe`, with no runtime to install. **Drag the session onto it**, or **double-click**
+to pick it, or drive it from the **command line**.
 
 ## Download
 
@@ -20,23 +24,66 @@ A single Windows `.exe`, with no runtime to install. **Drag the export folder on
 It is a single self-contained Windows 11 binary (no .NET install needed). That link always points at the
 newest build. You can also browse [all releases](https://github.com/bolausson/MyChron-GPS-to-Insta360/releases).
 
-## Getting the CSV export from RaceStudio3
+## Reading .xrk / .xrz directly (no CSV export needed)
 
-The single "AiM CSV" export resamples everything to one rate and has no true GPS time. Instead, use the
-per-channel CSV export, which gives GPS at its native rate plus a GPS-time column. Enable it once:
+RaceStudio stores each session as a single **`.xrk`** (and a compressed `.xrz`). Point the tool at one
+and it reads it directly, so the "export to CSV first" step disappears. Drop the file in, or pass it on
+the command line; a folder holding several is fine too.
+
+It is also better data. Compared against a CSV export of the same session: identical channels, identical
+sample times, and identical GPS fixes, but the CSV **rounds** on the way out (accelerations to 2
+decimals, gyro, steering, battery and temperature to 1) while the file itself keeps full precision. The
+logger file additionally carries the **GPS week number**, so the UTC clock no longer has to be inferred
+from the folder path, plus the track and racer, which land in the Telemetry Overlay preamble.
+
+**Nothing extra to install.** The reader is built in, so the single `.exe` stays a single `.exe`. AiM
+publish a library for reading these files, but it is proprietary and could not be bundled with a GPLv3
+project, so this tool implements the format itself. Format knowledge comes from
+[libxrk](https://github.com/m3rlin45/libxrk), an independent MIT-licensed implementation, and through it
+from TrackDataAnalysis by Scott Smith. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+It is checked, not assumed. `--verify-xrk` reads a file three ways and prints the differences:
+
+```
+MyChron2Insta360 "...\Session.xrk" --verify-xrk
+```
+
+On the reference session every channel, every GPS fix and every lap comes out **identical** to AiM's own
+library (same sample times to the millisecond, same values to float32 print precision), and matches the
+RaceStudio CSV export to that export's rounding. The comparison against AiM's library needs their DLLs
+present, via `--xrk-dll <folder>` or the `MYCHRON2INSTA360_XRK_DIR` environment variable; without them
+that column is simply skipped.
+
+One difference worth knowing: the logger records a few channels AiM's library does not hand out, such as
+`Luminosity` on a MyChron 6. Those are kept, so an xrk can produce a column the CSV export does not have.
+`--no-xrk` forces the CSV path. When a session exists as both a logger file and a `_CSV` folder, the
+logger file wins and the session is converted once, not twice.
+
+## Reading a RaceStudio CSV export instead (optional)
+
+**You do not need this.** Logger files are read directly, so there is nothing to configure in
+RaceStudio. This path exists because earlier versions required it, and it still works if you already
+have such exports lying around, or want to convert a session whose `.xrk` you no longer have.
+
+RaceStudio can write a **`..._CSV`** folder containing one file per channel. It is off by default;
+enable it once under:
 
 > **Preferences, Data Download Preferences, Advanced Tab, Additional Export Formats,**
 > tick **"CSV (Comma Separated Values)"**
 
 ![RaceStudio3 Data Download Preferences: the Advanced tab with "CSV (Comma Separated Values)" ticked under Additional Export Formats](media/RaceStudio3-Preferences.png)
 
-Now exporting a session writes a **`..._CSV`** folder containing one file per channel. This tool reads
-the GPS files from it:
+Point the tool at such a folder (or a parent folder of several) and it reads the GPS files from it:
 
 - **`_GPS_o.csv`**: raw receiver rate (**25 Hz** on MyChron 6). *Default.*
-- **`_GPS.csv`**: a 10 Hz decimation.
+- **`_GPS.csv`**: a 10 Hz decimation, selected with `--gps10`.
 
-Columns: `time, itow, lat, lon, alt, speed, accuracy`, where **`itow`** is GPS time-of-week.
+Columns: `time, itow, lat, lon, alt, speed, accuracy`, where **`itow`** is GPS time-of-week. Avoid the
+single "AiM CSV" export: it resamples everything to one rate and has no true GPS time.
+
+Two things to know if you use this path. The export **rounds** (accelerations to 2 decimals, gyro,
+steering, battery and temperature to 1), so it is less precise than the logger file. And it has no GPS
+week number, so the session date is taken from the folder path, or from `--date`.
 
 ## Reading an Insta360 video
 
@@ -168,7 +215,8 @@ place the files elsewhere with `--out-dir`.
 
 ## Features
 
-- Reads a RaceStudio `_CSV` folder, a **parent folder of several**, a `_GPS*.csv`, or an **Insta360
+- Reads a MyChron **`.xrk` / `.xrz`** directly, with no external library and no CSV export step, or a
+  RaceStudio `_CSV` folder, a **parent folder of several**, a `_GPS*.csv`, or an **Insta360
   `.insv` / `.lrv`** video, all auto-detected.
 - **Exact UTC** from GPS `itow` (MyChron) or from the camera's GPS records (Insta360), so no timezone
   configuration.
@@ -199,7 +247,9 @@ dotnet publish src/MyChron2Insta360.App -c Release
 **CLI:**
 
 ```powershell
-MyChron2Insta360 "...\Session_..._CSV"                       # one session, GPX, native 25 Hz
+MyChron2Insta360 "...\Session.xrk"                           # straight from the logger file
+MyChron2Insta360 "...\Session.xrk" --verify-xrk              # check the reader against AiM's library
+MyChron2Insta360 "...\Session_..._CSV"                       # a RaceStudio CSV export instead
 MyChron2Insta360 "...\Casteluccio" --format both             # parent folder, one file per session
 MyChron2Insta360 "...\Casteluccio" --merge --out-dir C:\out  # merge all sessions into one file
 MyChron2Insta360 "...\_GPS_o.csv" --hz 10 --nudge -1.5
@@ -224,7 +274,10 @@ MyChron2Insta360 --help
 | `--to-rate <hz>` | Telemetry Overlay grid rate (default 50) |
 | `--no-to-invert-steering` | Keep the logged steering sign (default: negated, matching the gauge) |
 | `--to-invert-lateral` | Negate lateral g (default: off, the "seat of the pants" sense) |
-| `--gps10` | Use `_GPS.csv` (10 Hz) instead of `_GPS_o.csv` (25 Hz) |
+| `--gps10` | Use `_GPS.csv` (10 Hz) instead of `_GPS_o.csv` (25 Hz). CSV exports only |
+| `--no-xrk` | Ignore `.xrk`/`.xrz` and use the RaceStudio CSV export instead |
+| `--verify-xrk` | Read an `.xrk` with this tool, AiM's library and the CSV export, and report differences |
+| `--xrk-dll <folder>` | Where AiM's library sits, used only by `--verify-xrk` |
 | `--hz <n>` | Downsample to n Hz (default: native rate) |
 | `--nudge <seconds>` | Shift every timestamp to fine-tune sync |
 | `--max-accuracy <m>` | Drop fixes with reported accuracy worse than m metres (default: keep all) |
@@ -244,7 +297,10 @@ Then in the Insta360 app: **Dashboard, Data Source, Local Files, Import**.
 
 ```
 src/
-  MyChron2Insta360.Core/   RaceStudioGpsCsv / RaceStudioImu / RaceStudioChannels (MyChron readers),
+  MyChron2Insta360.Core/   XrkBinary (reads .xrk/.xrz directly, no external library),
+                           XrkReader + XrkNative (optional cross-check against AiM's library),
+                           MyChronSources (picks the logger file or the CSV export),
+                           RaceStudioGpsCsv / RaceStudioImu / RaceStudioChannels (MyChron readers),
                            RaceStudioChannelScan (discovers whatever channels a session has),
                            Insta360Trailer (native .insv/.lrv metadata reader),
                            ItowTime (GPS to UTC), Conversion (build/downsample),
@@ -265,6 +321,23 @@ publicly documented format, with no external tool required; the layout was cross
 and the output verified against ExifTool on real files.
 
 ## Changes
+
+### 1.3.0
+
+- **Reads `.xrk` / `.xrz` logger files directly.** The RaceStudio CSV export step is gone: drop the
+  session file straight in. The parser is built in, so there is nothing extra to install and the
+  release stays a single self-contained `.exe`.
+- On a real 58-lap session it reproduces AiM's own library **exactly**: all 85 678 GPS fixes, 171 320
+  IMU samples and 58 laps at identical sample times, with values identical to float32 print precision.
+  Against the CSV export of the same session it agrees to that export's rounding, and is more precise,
+  because the export rounds accelerations to 2 decimals and most other channels to 1.
+- **`--verify-xrk`** reads a file three ways, with this tool, with AiM's library and from the CSV
+  export, and prints every difference, so the claim above is reproducible rather than a promise.
+- The logger file also carries the **GPS week number**, so the session date no longer has to come from
+  the folder path, plus the track and racer for the Telemetry Overlay preamble. It can even hold a
+  channel AiM's library does not hand out, such as `Luminosity` on a MyChron 6.
+- Fixed: `Logger Temperature` and `Battery` could come out in a different column order in the Telemetry
+  Overlay CSV depending on the source. Channels are now always ordered by name.
 
 ### 1.2.0
 

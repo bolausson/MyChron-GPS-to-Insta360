@@ -10,7 +10,7 @@
 
     <AssemblyName>MyChron2Insta360</AssemblyName>
     <RootNamespace>MyChron2Insta360.App</RootNamespace>
-    <Version>1.2.0</Version>
+    <Version>1.3.0</Version>
     <ApplicationIcon>MyChron2Insta360.ico</ApplicationIcon>
 
     <!-- Single self-contained .exe defaults for `dotnet publish` (override on the CLI as needed). -->

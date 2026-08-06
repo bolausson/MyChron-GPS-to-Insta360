@@ -228,13 +228,15 @@ public sealed class MainForm : Form
     private void AddViaFileDialog()
     {
         // List the files this tool actually reads, so the dialog offers the supported sources only.
+        const string logger = "*.xrk;*.xrz";
         const string myChron = "_GPS_o.csv;_GPS.csv;Accelerometer*.csv;Gyro*.csv;" +
                                "Logger Temperature.csv;_laps_and_splits.csv";
         const string video = "*.insv;*.lrv";
         using var dlg = new OpenFileDialog
         {
             Multiselect = true,
-            Filter = $"Supported telemetry|{myChron};{video}|" +
+            Filter = $"Supported telemetry|{logger};{myChron};{video}|" +
+                     $"MyChron logger file (*.xrk;*.xrz)|{logger}|" +
                      $"MyChron / RaceStudio channels|{myChron}|" +
                      $"Insta360 video (*.insv;*.lrv)|{video}|" +
                      "All files (*.*)|*.*",
@@ -261,21 +263,20 @@ public sealed class MainForm : Form
         }
         catch { /* fall through to the RaceStudio check */ }
 
-        int total = 0, bad = 0;
-        foreach (var p in paths)
-        {
-            try { total += RaceStudioGpsCsv.DiscoverGpsFiles(p).Count; }
-            catch { bad++; }
-        }
-        if (total == 0)
+        // Discovery only: an xrk is tens of megabytes, far too slow to parse on every list change.
+        List<MyChronSources.Candidate> found;
+        try { found = MyChronSources.Discover(paths); }
+        catch (Exception e)
         {
             _resolved.ForeColor = Color.Firebrick;
-            _resolved.Text = "→ no _GPS_o.csv / _GPS.csv found in the listed item(s)";
+            _resolved.Text = "→ " + e.Message.Split('\n')[0];
             return;
         }
-        _resolved.ForeColor = bad > 0 ? Color.DarkGoldenrod : Color.DimGray;
+        _resolved.ForeColor = Color.DimGray;
         string mode = _merge.Checked ? "merge into one" : "one file each";
-        _resolved.Text = $"→ {total} session(s) found ({mode})" + (bad > 0 ? $" , {bad} item(s) unreadable" : "");
+        int xrk = found.Count(s => s.IsXrk);
+        string via = xrk == found.Count ? "from xrk" : xrk > 0 ? $"{xrk} from xrk" : "from CSV export";
+        _resolved.Text = $"→ {found.Count} session(s) found, {via} ({mode})";
     }
 
     /// <summary>
@@ -283,21 +284,25 @@ public sealed class MainForm : Form
     /// levelled, so the tilt correction reaches this export just as it reaches GPX and FIT. Returns
     /// the file written.
     /// </summary>
-    private string WriteTelemetryOverlay(GpsSession s, string folder, IReadOnlyList<ImuSample> imu,
+    private string WriteTelemetryOverlay(MyChronSource src, IReadOnlyList<ImuSample> imu,
                                          string basePath, DateTime? startUtc)
     {
-        var channels = RaceStudioChannelScan.Discover(folder);
-        var laps = RaceStudioChannels.LoadLapsElapsed(folder);
+        var channels = src.LoadChannels();
+        var laps = src.LoadLaps();
         var opt = new TelemetryOverlayOptions
         {
-            SessionName = s.Name,
+            // An xrk knows the track, racer and championship; a CSV export does not.
+            SessionName = src.Info?.Track is { Length: > 0 } track ? track : src.Gps.Name,
+            Racer = src.Info?.Racer ?? "",
+            Vehicle = src.Info?.Vehicle ?? "",
+            Championship = src.Info?.Championship ?? "",
             StartLocal = startUtc is DateTime utc
                 ? TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), TimeZoneInfo.Local)
-                : null,
+                : src.Info?.StartLocal,
         };
         string path = basePath + "_TelemetryOverlay.csv";
-        Log($"  Telemetry Overlay CSV, {channels.Count} channel file(s) found:");
-        TelemetryOverlayCsv.Write(path, s, imu, channels, laps, opt, Log);
+        Log($"  Telemetry Overlay CSV, {channels.Count} channel(s) found:");
+        TelemetryOverlayCsv.Write(path, src.Gps, imu, channels, laps, opt, Log);
         return path;
     }
 
@@ -538,13 +543,14 @@ public sealed class MainForm : Form
         {
             var result = await Task.Run(() =>
             {
-                var sessions = RaceStudioGpsCsv.LoadAll(inputs);
-                var sessionLines = sessions.Select(s => $"  {DirName(Path.GetDirectoryName(s.SourceFile)!)}, {s.Samples.Count} fixes, {s.NativeHz:0.#} Hz").ToList();
+                var sources = MyChronSources.LoadAll(inputs);
+                var sessions = sources.Select(s => s.Gps).ToList();
+                var sessionLines = sources.Select(s => "  " + s.Describe()).ToList();
                 if (outDir is not null) Directory.CreateDirectory(outDir);
 
                 var written = new List<string>();
                 int totalPoints = 0;
-                bool merged = merge && sessions.Count > 1;
+                bool merged = merge && sources.Count > 1;
 
                 if (merged)
                 {
@@ -556,16 +562,15 @@ public sealed class MainForm : Form
                     string basePath = Path.Combine(dir, baseName);
                     string name = $"{baseName} ({sessions.Count} sessions)";
                     var allImu = new List<ImuSample>();
-                    foreach (var s in sessions)
+                    foreach (var src in sources)
                     {
-                        string sessionFolder = Path.GetDirectoryName(s.SourceFile)!;
-                        var im = RaceStudioImu.Load(sessionFolder);
+                        var im = src.LoadImu();
                         tiltPlan.ApplyTo(im, Log);
                         if (imuHz > 0) im = ImuCsvWriter.Downsample(im, imuHz);
                         // The AiM container describes one session, so this export stays per session
                         // even when the GPX and FIT are merged.
                         if (toCsv)
-                            written.Add(WriteTelemetryOverlay(s, sessionFolder, im, Path.Combine(dir, DirName(sessionFolder)), opt.StartUtc));
+                            written.Add(WriteTelemetryOverlay(src, im, Path.Combine(dir, src.BaseName), opt.StartUtc));
                         allImu.AddRange(im);
                     }
                     if (gpx) { var p = basePath + ".gpx"; GpxWriter.Write(p, segs, name); written.Add(p); }
@@ -579,33 +584,36 @@ public sealed class MainForm : Form
                 }
                 else
                 {
-                    foreach (var s in sessions)
+                    foreach (var src in sources)
                     {
-                        var segs = TrackBuilder.Build(new[] { s }, opt);
+                        var segs = TrackBuilder.Build(new[] { src.Gps }, opt);
                         totalPoints += opt.TotalPoints;
-                        string folder = Path.GetDirectoryName(s.SourceFile)!;
-                        string baseName = DirName(folder);
-                        string dir = outDir ?? folder;
-                        string basePath = Path.Combine(dir, baseName);
+                        string dir = outDir ?? (src.FromXrk ? Path.GetDirectoryName(src.Path)! : src.Path);
+                        string basePath = Path.Combine(dir, src.BaseName);
 
                         // IMU, laps and temperature ride along into the FIT and the IMU CSV.
                         DateTime? startUtc = opt.StartUtc;
-                        var imu = RaceStudioImu.Load(folder);
+                        var imu = src.LoadImu();
                         tiltPlan.ApplyTo(imu, Log);   // level before any downsample, so every output agrees
                         if (imuHz > 0) imu = ImuCsvWriter.Downsample(imu, imuHz);
                         if (startUtc is DateTime su0) foreach (var v in imu) v.Utc = su0.AddSeconds(v.ElapsedS);
+
+                        var laps = new List<LapSplit>();
+                        if (startUtc is DateTime lapStart)
+                            foreach (var (number, start, duration) in src.LoadLaps())
+                                laps.Add(new LapSplit { Number = number, StartUtc = lapStart.AddSeconds(start), DurationS = duration });
                         var ex = new FitWriter.Extras
                         {
                             Imu = imu.Count > 0 ? imu : null,
-                            Laps = RaceStudioChannels.LoadLaps(folder, startUtc),
-                            Temperature = RaceStudioChannels.LoadTemperature(folder, startUtc),
+                            Laps = laps,
+                            Temperature = MyChronSources.Temperature(src.LoadChannels(), startUtc),
                         };
 
-                        if (gpx) { var p = basePath + ".gpx"; GpxWriter.Write(p, segs, s.Name); written.Add(p); }
-                        if (fit) { var p = basePath + ".fit"; FitWriter.Write(p, segs, s.Name, ex); written.Add(p); }
+                        if (gpx) { var p = basePath + ".gpx"; GpxWriter.Write(p, segs, src.Gps.Name); written.Add(p); }
+                        if (fit) { var p = basePath + ".fit"; FitWriter.Write(p, segs, src.Gps.Name, ex); written.Add(p); }
                         if (imuCsv && imu.Count > 0) { var p = basePath + "_imu.csv"; ImuCsvWriter.Write(p, imu); written.Add(p); }
                         // Same levelled IMU stream the FIT and the IMU CSV get, never re-read from disk.
-                        if (toCsv) written.Add(WriteTelemetryOverlay(s, folder, imu, basePath, startUtc));
+                        if (toCsv) written.Add(WriteTelemetryOverlay(src, imu, basePath, startUtc));
                     }
                 }
                 return (count: sessions.Count, sessionLines, written, totalPoints, merged);

@@ -61,8 +61,10 @@ public static class TrackBuilder
         {
             firstNativeHz ??= session.NativeHz;
             bool haveItow = session.Samples.Any(s => !double.IsNaN(s.ItowMs) && s.ItowMs > 0);
+            // An xrk carries the GPS week itself, so no calendar hint is needed to place the iTOW.
+            int? week = opt.DateOverrideUtc is null ? session.GpsWeek : null;
             DateTime? dateHint = opt.DateOverrideUtc ?? session.DateHint;
-            if (haveItow && dateHint is null)
+            if (haveItow && week is null && dateHint is null)
                 throw new InvalidOperationException($"Could not determine the date for '{Path.GetFileName(session.SourceFile)}'.");
             if (haveItow) opt.UsedItow = true;
 
@@ -80,7 +82,8 @@ public static class TrackBuilder
                 lastKept = s.TimeRel;
 
                 DateTime utc = haveItow && !double.IsNaN(s.ItowMs) && s.ItowMs > 0
-                    ? ItowTime.ToUtc(s.ItowMs, dateHint!.Value, opt.LeapSeconds)
+                    ? (week is int w ? ItowTime.FromWeek(w, s.ItowMs, opt.LeapSeconds)
+                                     : ItowTime.ToUtc(s.ItowMs, dateHint!.Value, opt.LeapSeconds))
                     : dateHint!.Value.Date.AddSeconds(s.TimeRel); // degraded fallback
                 utc = DateTime.SpecifyKind(utc, DateTimeKind.Utc).AddSeconds(opt.ManualOffsetSeconds);
 

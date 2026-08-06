@@ -13,6 +13,13 @@ public static class ItowTime
     /// <summary>GPS - UTC leap seconds. 18 since 2017; none announced through 2026.</summary>
     public const int DefaultLeapSeconds = 18;
 
+    /// <summary>
+    /// Exact UTC from the GPS week number and the time of week, with no calendar hint needed. The xrk
+    /// files carry the week number, so this is preferred whenever it is available.
+    /// </summary>
+    public static DateTime FromWeek(int weekNumber, double itowMs, int leapSeconds = DefaultLeapSeconds) =>
+        GpsEpoch.AddSeconds(weekNumber * SecondsPerWeek + itowMs / 1000.0 - leapSeconds);
+
     public static DateTime ToUtc(double itowMs, DateTime dateHint, int leapSeconds = DefaultLeapSeconds)
     {
         DateTime hintUtc = dateHint.Kind == DateTimeKind.Utc ? dateHint : DateTime.SpecifyKind(dateHint, DateTimeKind.Utc);

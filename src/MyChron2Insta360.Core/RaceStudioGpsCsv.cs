@@ -19,6 +19,7 @@ public sealed class GpsSession
     public List<GpsSample> Samples { get; } = new();
     public string Name { get; set; } = "Session";
     public DateTime? DateHint { get; set; }   // rough date (UTC) used only to pick the GPS week for iTOW
+    public int? GpsWeek { get; set; }         // exact GPS week when the source supplies it (xrk does)
     public string SourceFile { get; set; } = "";
     public double NativeHz { get; set; }
 }
@@ -148,7 +149,7 @@ public static class RaceStudioGpsCsv
     }
 
     /// <summary>RaceStudio exports under ...\data\YYYY-MM-DD\Racer\Track\...; pull that date, else the file's write time.</summary>
-    private static DateTime? ExtractDateHint(string gpsFile)
+    internal static DateTime? ExtractDateHint(string gpsFile)
     {
         foreach (var part in gpsFile.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
             if (DateTime.TryParseExact(part, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var d))
@@ -156,7 +157,7 @@ public static class RaceStudioGpsCsv
         try { return File.GetLastWriteTimeUtc(gpsFile); } catch { return null; }
     }
 
-    private static string ExtractName(string gpsFile)
+    internal static string ExtractName(string gpsFile)
     {
         string dir = Path.GetFileName(Path.GetDirectoryName(gpsFile) ?? "");
         return string.IsNullOrEmpty(dir) ? Path.GetFileNameWithoutExtension(gpsFile) : dir;

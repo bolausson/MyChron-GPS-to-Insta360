@@ -83,19 +83,16 @@ internal sealed class TiltPlan
             return null;
         }
 
-        foreach (var p in paths)
+        List<MyChronSource> sources;
+        try { sources = MyChronSources.LoadAll(paths); }
+        catch (Exception e) { why = e.Message; return null; }
+
+        foreach (var s in sources)
         {
-            List<string> gpsFiles;
-            try { gpsFiles = RaceStudioGpsCsv.DiscoverGpsFiles(p); } catch { continue; }
-            foreach (var gps in gpsFiles)
-            {
-                string folder = Path.GetDirectoryName(gps)!;
-                if (!RaceStudioImu.HasImu(folder)) continue;
-                var imu = RaceStudioImu.Load(folder);
-                if (imu.Count == 0) continue;
-                source = new DirectoryInfo(folder).Name;
-                return TiltCorrection.Detect(imu, out why);
-            }
+            var imu = s.LoadImu();
+            if (imu.Count == 0) continue;
+            source = s.BaseName;
+            return TiltCorrection.Detect(imu, out why);
         }
         why = "no accelerometer data found in the selected input(s)";
         return null;
