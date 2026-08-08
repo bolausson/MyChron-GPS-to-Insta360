@@ -55,8 +55,13 @@ internal sealed class AppSettings
     /// what lets a settings file live outside a read-only install folder and still be found on the next
     /// start, without the program needing a registry key or a hidden profile directory.
     /// </summary>
-    public static string Resolve(string? path)
+    public static string Resolve(string? path) => Resolve(path, out _);
+
+    /// <param name="viaPointer">True when the answer came from a "settings-file" redirect, which lets
+    /// the caller say so when the file it points at is missing rather than quietly using defaults.</param>
+    public static string Resolve(string? path, out bool viaPointer)
     {
+        viaPointer = false;
         if (!string.IsNullOrWhiteSpace(path)) return path!;
         string def = DefaultPath;
         try
@@ -69,7 +74,9 @@ internal sealed class AppSettings
                 int eq = line.IndexOf('=');
                 if (eq <= 0) continue;
                 string target = line[(eq + 1)..].Trim();
-                if (target.Length > 0 && File.Exists(target)) return target;
+                // Returned even when it is missing: a settings file on a network or sync folder that
+                // has not arrived yet must be reported, not silently replaced by the defaults.
+                if (target.Length > 0) { viaPointer = true; return target; }
             }
         }
         catch (IOException) { /* fall back to the default file */ }
@@ -79,10 +86,15 @@ internal sealed class AppSettings
     /// <summary>Read a settings file. A missing file simply yields the built-in defaults.</summary>
     public static AppSettings Load(string? path, out string used, out string? error)
     {
-        used = Resolve(path);
+        used = Resolve(path, out bool viaPointer);
         error = null;
         var s = new AppSettings();
-        if (!File.Exists(used)) return s;
+        if (!File.Exists(used))
+        {
+            if (viaPointer)
+                error = $"{DefaultPath} points here, but the file is not there. Using the built-in defaults.";
+            return s;
+        }
 
         try
         {

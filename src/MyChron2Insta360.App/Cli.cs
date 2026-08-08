@@ -61,11 +61,11 @@ internal static class Cli
             }
             var settings = new AppSettings { Format = "gpx" };   // the command line's own default
             string iniUsed = "";
-            if (useIni && AppSettings.Exists(iniPath))
+            if (useIni)
             {
-                settings = AppSettings.Load(iniPath, out iniUsed, out string? iniError);
-                if (iniError is not null) Console.Error.WriteLine($"Warning: could not read {iniUsed}: {iniError}");
-                else Console.WriteLine($"Settings from {iniUsed}");
+                var loaded = AppSettings.Load(iniPath, out iniUsed, out string? iniError);
+                if (iniError is not null) Console.Error.WriteLine($"Warning: {iniUsed}: {iniError}");
+                else if (File.Exists(iniUsed)) { settings = loaded; Console.WriteLine($"Settings from {iniUsed}"); }
             }
 
             var inputs = new List<string>();

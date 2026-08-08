@@ -180,7 +180,12 @@ public sealed class MainForm : Form
 
         // Saved defaults, if the user ever pressed "Save as default".
         var saved = AppSettings.Load(null, out string iniUsed, out string? iniError);
-        if (iniError is not null) Log($"Could not read {iniUsed}: {iniError}");
+        if (iniError is not null)
+        {
+            Log($"Settings: {iniUsed}");
+            Log($"  {iniError}");
+            _iniPath.Text = iniUsed;   // so 'Save as default' writes back to where it was meant to go
+        }
         else if (File.Exists(iniUsed))
         {
             ApplySettings(saved);

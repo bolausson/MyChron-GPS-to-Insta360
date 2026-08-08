@@ -170,9 +170,23 @@ default** and it comes back that way next time: output folder, which formats to 
 output rates, tilt correction, merge and trim. **Reset** puts the built-in defaults back, and offers to
 delete the saved file so the next start is clean too.
 
-Settings live in a small ini file called **`MyChron2Insta360.ini`**, beside the program. Put a path in
-the **Settings file** box to keep it somewhere else, which is what you want if the program sits in a
-folder you cannot write to; a one-line pointer is left behind so it is still found next time.
+Settings live in a small ini file called **`MyChron2Insta360.ini`**, beside the program.
+
+Put a path in the **Settings file** box to keep them somewhere else instead, which is what you want if
+the program sits in a folder you cannot write to, or if you sync your configuration between machines.
+Saving then writes two files: your settings where you asked for them, and a two-line pointer at the
+default location:
+
+```ini
+# This program's settings live elsewhere. Edit or delete the line below to change that.
+settings-file = C:\Users\you\Config-Backups\MyChron2Insta360.ini
+```
+
+That pointer is how the next start finds them, so **a desktop shortcut needs no arguments**: the lookup
+uses the exe's own folder, not the working directory or wherever you launched from. Both files have to
+survive; delete the pointer and it falls back to the built-in defaults, with your settings file still
+sitting there unreferenced. If the pointer names a file that is not there, say on a machine where your
+sync has not caught up, it says so and uses the built-in defaults rather than pretending.
 
 The file is plain text and every key is named after the command line option it stands for, so it doubles
 as a note of the equivalent command:
@@ -181,7 +195,7 @@ as a note of the equivalent command:
 [MyChron2Insta360]
 format = gpx,fit,telemetry-overlay
 imu-csv = true
-out-dir = C:	elemetry-out
+out-dir = C:\telemetry-out
 rate = native
 imu-hz = 50
 tilt = auto
@@ -353,6 +367,12 @@ publicly documented format, with no external tool required; the layout was cross
 and the output verified against ExifTool on real files.
 
 ## Changes
+
+### 1.3.2
+
+- Fixed: if the settings file was kept elsewhere and that file was missing, say on a machine where a
+  sync folder had not caught up, the program quietly used the built-in defaults while reporting that it
+  had loaded your settings. It now names the file it expected and says it fell back.
 
 ### 1.3.1
 
