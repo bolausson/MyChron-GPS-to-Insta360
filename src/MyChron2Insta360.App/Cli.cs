@@ -50,18 +50,45 @@ internal static class Cli
             if (args.Any(a => a is "-h" or "--help")) { PrintHelp(); return 0; }
             if (args.Any(a => a == "--version")) { Console.WriteLine($"MyChron2Insta360 {AppInfo.Version}"); return 0; }
 
+            // A settings file, if there is one, supplies the starting values; any flag below overrides
+            // it. Without one nothing changes, so existing scripts keep behaving exactly as before.
+            string? iniPath = null;
+            bool useIni = true;
+            for (int k = 0; k < args.Length; k++)
+            {
+                if (args[k] == "--ini" && k + 1 < args.Length) iniPath = args[k + 1];
+                else if (args[k] == "--no-ini") useIni = false;
+            }
+            var settings = new AppSettings { Format = "gpx" };   // the command line's own default
+            string iniUsed = "";
+            if (useIni && AppSettings.Exists(iniPath))
+            {
+                settings = AppSettings.Load(iniPath, out iniUsed, out string? iniError);
+                if (iniError is not null) Console.Error.WriteLine($"Warning: could not read {iniUsed}: {iniError}");
+                else Console.WriteLine($"Settings from {iniUsed}");
+            }
+
             var inputs = new List<string>();
-            string? output = null, outDir = null, format = "gpx", dateStr = null;
-            double? nudge = null, hz = null, maxAcc = null;
+            string? output = null, dateStr = null;
+            string? outDir = settings.OutDir.Length > 0 ? settings.OutDir : null;
+            // A settings file saved with every output unticked would otherwise be an error here.
+            string format = settings.Format.Trim().Length > 0 ? settings.Format : "gpx";
+            double? nudge = settings.Nudge != 0 ? settings.Nudge : null;
+            double? hz = settings.NativeRate ? null : settings.Hz;
+            double? maxAcc = settings.MaxAccuracy != 0 ? settings.MaxAccuracy : null;
             int? leap = null;
-            bool trim = false, gps10 = false, merge = false, writeImuCsv = true;
-            double imuHz = 0; // 0 = native rate
-            bool tilt = false, detectTilt = false;
-            double? tiltDeg = null; // null with tilt on = measure it from the data
-            bool noXrk = false, verifyXrk = false;
-            double toRate = 50;
-            bool toInvertSteering = true;   // Telemetry Overlay renders steering mirrored
-            bool toInvertLateral = false;   // off keeps the "seat of the pants" sense
+            bool gps10 = false;
+            bool trim = settings.Trim, merge = settings.Merge, writeImuCsv = settings.ImuCsv;
+            double imuHz = settings.ImuHz; // 0 = native rate
+            bool tilt = !settings.Tilt.Equals("off", StringComparison.OrdinalIgnoreCase);
+            bool detectTilt = false;
+            // null with tilt on = measure it from the data
+            double? tiltDeg = tilt && !settings.Tilt.Equals("auto", StringComparison.OrdinalIgnoreCase)
+                ? ParseD(settings.Tilt) : null;
+            bool noXrk = !settings.PreferXrk, verifyXrk = false;
+            double toRate = settings.ToRate;
+            bool toInvertSteering = settings.ToInvertSteering;   // Telemetry Overlay renders steering mirrored
+            bool toInvertLateral = settings.ToInvertLateral;     // off keeps the "seat of the pants" sense
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -102,6 +129,8 @@ internal static class Cli
                     case "--no-to-invert-steering": toInvertSteering = false; break;
                     case "--to-invert-lateral": toInvertLateral = true; break;
                     case "--no-to-invert-lateral": toInvertLateral = false; break;
+                    case "--ini": Next(); break;      // already read, before this loop
+                    case "--no-ini": break;
                     case "--nogui": break;
                     default:
                         if (a.Length > 0 && a[0] != '-') inputs.Add(a);
@@ -154,7 +183,6 @@ internal static class Cli
             var sessions = sources.Select(s => s.Gps).ToList();
             Console.WriteLine($"Found {sources.Count} session(s):");
             foreach (var s in sources) Console.WriteLine("  " + s.Describe());
-            if (sources.Any(s => s.FromXrk)) Console.WriteLine($"  (xrk read via {XrkReader.LibraryPath})");
             if (outDir is not null) Directory.CreateDirectory(outDir);
 
             if (merge && sources.Count > 1)
@@ -664,6 +692,9 @@ Options:
                             Default gpx. (--fit / --both are shortcuts.)
   --gps10                   Use _GPS.csv (10 Hz) instead of _GPS_o.csv (25 Hz). CSV exports only.
   --no-xrk                  Ignore .xrk/.xrz and use the RaceStudio CSV export instead.
+  --ini <file>              Read starting values from this settings file instead of the default
+                            (MyChron2Insta360.ini beside this program). Any option here wins over it.
+  --no-ini                  Ignore the settings file entirely.
   --verify-xrk              Read an .xrk with this tool, with AiM's library and from the CSV export,
                             report every difference, then exit. Writes nothing.
   --xrk-dll <folder>        Where AiM's library sits. Only --verify-xrk uses it.

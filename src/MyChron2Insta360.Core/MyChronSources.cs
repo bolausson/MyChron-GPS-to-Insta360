@@ -19,8 +19,12 @@ public sealed class MyChronSource
     public required Func<List<ChannelSeries>> LoadChannels { get; init; }
     public required Func<List<(int Number, double StartS, double DurationS)>> LoadLaps { get; init; }
 
+    /// <summary>What it was read from: the logger file's own extension, or "CSV" for an export.</summary>
+    public string SourceKind =>
+        FromXrk ? System.IO.Path.GetExtension(Path).TrimStart('.').ToLowerInvariant() : "CSV";
+
     public string Describe() =>
-        $"{BaseName}  ({Gps.Samples.Count} fixes, {Gps.NativeHz:0.#} Hz, {(FromXrk ? "xrk" : "CSV")})" +
+        $"{BaseName}  ({Gps.Samples.Count} fixes, {Gps.NativeHz:0.#} Hz, {SourceKind})" +
         (Info?.Describe() is { Length: > 0 } d ? $"  [{d}]" : "");
 }
 
@@ -32,7 +36,11 @@ public sealed class MyChronSource
 public static class MyChronSources
 {
     /// <summary>One session that was found, before anything is parsed.</summary>
-    public readonly record struct Candidate(string Path, bool IsXrk, string BaseName);
+    public readonly record struct Candidate(string Path, bool IsXrk, string BaseName)
+    {
+        /// <summary>"xrk", "xrz" or "CSV", so the log names the file actually used.</summary>
+        public string Kind => IsXrk ? System.IO.Path.GetExtension(Path).TrimStart('.').ToLowerInvariant() : "CSV";
+    }
 
     /// <summary>Parse the chosen sessions. See <see cref="Discover"/> for how they are picked.</summary>
     public static List<MyChronSource> LoadAll(IEnumerable<string> inputs, bool gps10 = false, bool preferXrk = true)

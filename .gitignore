@@ -12,3 +12,6 @@ publish/
 *.gpx
 *.fit
 !samples/**/*.gpx
+
+# Saved GUI settings (written by "Save as default")
+*.ini

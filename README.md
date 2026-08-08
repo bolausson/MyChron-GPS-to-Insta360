@@ -163,6 +163,36 @@ left in the "seat of the pants" sense. `--no-to-invert-steering` and `--to-inver
 This export reads a RaceStudio session folder, so it does not apply to Insta360 video input.
 `docs/TelemetryOverlay-CSV-Spec.md` documents the file format in full.
 
+## Remembering your settings
+
+The GUI starts with sensible defaults. Once you have it set up the way you like, press **Save as
+default** and it comes back that way next time: output folder, which formats to write, the IMU and
+output rates, tilt correction, merge and trim. **Reset** puts the built-in defaults back, and offers to
+delete the saved file so the next start is clean too.
+
+Settings live in a small ini file called **`MyChron2Insta360.ini`**, beside the program. Put a path in
+the **Settings file** box to keep it somewhere else, which is what you want if the program sits in a
+folder you cannot write to; a one-line pointer is left behind so it is still found next time.
+
+The file is plain text and every key is named after the command line option it stands for, so it doubles
+as a note of the equivalent command:
+
+```ini
+[MyChron2Insta360]
+format = gpx,fit,telemetry-overlay
+imu-csv = true
+out-dir = C:	elemetry-out
+rate = native
+imu-hz = 50
+tilt = auto
+merge = false
+```
+
+**The command line reads it too**, which makes scripting shorter: put the common options in a file and
+pass only what changes. Any option you type still wins over the file. `--ini <file>` picks a different
+one and `--no-ini` ignores it entirely, so a script can guarantee it is unaffected. With no file
+present nothing changes at all.
+
 ## Mount tilt correction
 
 A MyChron sits at an angle on the steering wheel, so it never measures level. A slice of gravity stays
@@ -277,6 +307,8 @@ MyChron2Insta360 --help
 | `--gps10` | Use `_GPS.csv` (10 Hz) instead of `_GPS_o.csv` (25 Hz). CSV exports only |
 | `--no-xrk` | Ignore `.xrk`/`.xrz` and use the RaceStudio CSV export instead |
 | `--verify-xrk` | Read an `.xrk` with this tool, AiM's library and the CSV export, and report differences |
+| `--ini <file>` | Read starting values from this settings file instead of the default |
+| `--no-ini` | Ignore the settings file entirely |
 | `--xrk-dll <folder>` | Where AiM's library sits, used only by `--verify-xrk` |
 | `--hz <n>` | Downsample to n Hz (default: native rate) |
 | `--nudge <seconds>` | Shift every timestamp to fine-tune sync |
@@ -321,6 +353,16 @@ publicly documented format, with no external tool required; the layout was cross
 and the output verified against ExifTool on real files.
 
 ## Changes
+
+### 1.3.1
+
+- The GUI **remembers your settings**: press *Save as default* and the output folder, formats, rates,
+  tilt correction, merge and trim come back next time. *Reset* restores the built-in defaults. Settings
+  go in `MyChron2Insta360.ini` beside the program, or wherever the *Settings file* box points.
+- The command line reads that file too, so a script can carry the common options in one place and pass
+  only what changes. `--ini <file>` picks another one, `--no-ini` ignores it.
+- The **Telemetry Overlay** export is now ticked by default.
+- Fixed: dropping an `.xrz` reported the source as "xrk". It now names the file kind actually used.
 
 ### 1.3.0
 

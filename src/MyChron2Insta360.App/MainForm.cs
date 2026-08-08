@@ -22,7 +22,8 @@ public sealed class MainForm : Form
     private readonly CheckBox _gpx = new() { Text = "GPX", Checked = true };
     private readonly CheckBox _fit = new() { Text = "FIT", Checked = true };
     private readonly CheckBox _imuCsv = new() { Text = "IMU CSV", Checked = true };
-    private readonly CheckBox _toCsv = new() { Text = "Telemetry Overlay", Checked = false };
+    private readonly CheckBox _toCsv = new() { Text = "Telemetry Overlay", Checked = true };
+    private readonly TextBox _iniPath = new() { PlaceholderText = "(MyChron2Insta360.ini, beside the exe)" };
     private readonly Label _formatHelp = new() { AutoSize = false, ForeColor = Color.DimGray };
     private readonly NumericUpDown _imuHz = new() { Minimum = 0, Maximum = 1000, Increment = 10, Value = 0 };
     private readonly CheckBox _tilt = new() { Text = "Correct mount tilt", Checked = false };
@@ -37,8 +38,8 @@ public sealed class MainForm : Form
     public MainForm(string[]? preload = null)
     {
         Text = "MyChron → Insta360";
-        ClientSize = new Size(640, 788);
-        MinimumSize = new Size(560, 586);
+        ClientSize = new Size(640, 822);
+        MinimumSize = new Size(560, 620);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9F);
         try { Icon = System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath!); } catch { /* keep default icon */ }
@@ -153,7 +154,15 @@ public sealed class MainForm : Form
 
         _trim.SetBounds(ctrlX, y, 340, 24);
         Controls.Add(_trim);
-        y += 40;
+        y += 32;
+
+        AddLabel("Settings file:", x, y + 4, labelW);
+        _iniPath.SetBounds(ctrlX, y, ctrlW - 200, 26);
+        _iniPath.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+        Controls.Add(_iniPath);
+        AddRightButton("Save as default", ctrlX + ctrlW - 194, y - 1, 106, SaveDefaults);
+        AddRightButton("Reset", ctrlX + ctrlW - 84, y - 1, 84, ResetDefaults);
+        y += 34;
 
         _convert.SetBounds(ctrlX, y, 200, 38);
         _convert.Font = new Font(Font, FontStyle.Bold);
@@ -166,8 +175,22 @@ public sealed class MainForm : Form
         _log.Font = new Font("Consolas", 8.5F);
         Controls.Add(_log);
 
+        Log($"v{AppInfo.Version} ready. Add or drop MyChron .xrk / .xrz files, RaceStudio '_CSV' folders, " +
+            "or Insta360 videos (.insv / .lrv).");
+
+        // Saved defaults, if the user ever pressed "Save as default".
+        var saved = AppSettings.Load(null, out string iniUsed, out string? iniError);
+        if (iniError is not null) Log($"Could not read {iniUsed}: {iniError}");
+        else if (File.Exists(iniUsed))
+        {
+            ApplySettings(saved);
+            // Show the path when it is not the default one, so it is clear where these came from.
+            if (!string.Equals(iniUsed, AppSettings.DefaultPath, StringComparison.OrdinalIgnoreCase))
+                _iniPath.Text = iniUsed;
+            Log($"Loaded your saved settings from {iniUsed}");
+        }
+
         if (preload is { Length: > 0 }) AddInputs(preload);
-        Log($"v{AppInfo.Version} ready. Add or drop RaceStudio '_CSV' folders, or Insta360 videos (.insv / .lrv).");
     }
 
     private void AddLabel(string text, int left, int top, int width) =>
@@ -274,9 +297,9 @@ public sealed class MainForm : Form
         }
         _resolved.ForeColor = Color.DimGray;
         string mode = _merge.Checked ? "merge into one" : "one file each";
-        int xrk = found.Count(s => s.IsXrk);
-        string via = xrk == found.Count ? "from xrk" : xrk > 0 ? $"{xrk} from xrk" : "from CSV export";
-        _resolved.Text = $"→ {found.Count} session(s) found, {via} ({mode})";
+        // Name the file kinds actually used, so dropping an .xrz does not report "xrk".
+        var kinds = found.Select(f => f.Kind).Distinct().OrderBy(k => k, StringComparer.OrdinalIgnoreCase);
+        _resolved.Text = $"→ {found.Count} session(s) found, from {string.Join(" + ", kinds)} ({mode})";
     }
 
     /// <summary>
@@ -304,6 +327,104 @@ public sealed class MainForm : Form
         Log($"  Telemetry Overlay CSV, {channels.Count} channel(s) found:");
         TelemetryOverlayCsv.Write(path, src.Gps, imu, channels, laps, opt, Log);
         return path;
+    }
+
+    /// <summary>The current control values, as the settings file records them.</summary>
+    private AppSettings CollectSettings()
+    {
+        var formats = new List<string>();
+        if (_gpx.Checked) formats.Add("gpx");
+        if (_fit.Checked) formats.Add("fit");
+        if (_toCsv.Checked) formats.Add("telemetry-overlay");
+        string typedTilt = _tiltDeg.Text.Trim();
+        return new AppSettings
+        {
+            Format = string.Join(",", formats),
+            ImuCsv = _imuCsv.Checked,
+            OutDir = _outDir.Text.Trim(),
+            Nudge = (double)_nudge.Value,
+            NativeRate = _native.Checked,
+            Hz = (double)_hz.Value,
+            MaxAccuracy = (double)_maxAcc.Value,
+            ImuHz = (double)_imuHz.Value,
+            Tilt = !_tilt.Checked ? "off" : typedTilt.Length == 0 ? "auto" : typedTilt,
+            Merge = _merge.Checked,
+            Trim = _trim.Checked,
+        };
+    }
+
+    private void ApplySettings(AppSettings s)
+    {
+        var f = s.Format.Split(new[] { ',', '+', ' ' }, StringSplitOptions.RemoveEmptyEntries)
+                        .Select(t => t.Trim().ToLowerInvariant()).ToList();
+        _gpx.Checked = f.Contains("gpx") || f.Contains("both");
+        _fit.Checked = f.Contains("fit") || f.Contains("both");
+        _toCsv.Checked = f.Contains("telemetry-overlay") || f.Contains("telemetryoverlay") || f.Contains("to");
+        _imuCsv.Checked = s.ImuCsv;
+        _outDir.Text = s.OutDir;
+        _nudge.Value = Clamp(_nudge, s.Nudge);
+        _native.Checked = s.NativeRate;
+        _hz.Value = Clamp(_hz, s.Hz);
+        _maxAcc.Value = Clamp(_maxAcc, s.MaxAccuracy);
+        _imuHz.Value = Clamp(_imuHz, s.ImuHz);
+
+        bool off = s.Tilt.Equals("off", StringComparison.OrdinalIgnoreCase) || s.Tilt.Length == 0;
+        _tilt.Checked = !off;
+        _tiltDeg.Text = off || s.Tilt.Equals("auto", StringComparison.OrdinalIgnoreCase) ? "" : s.Tilt;
+        _merge.Checked = s.Merge;
+        _trim.Checked = s.Trim;
+
+        UpdateTiltEnabled();
+        UpdateResolved();
+    }
+
+    /// <summary>A saved value outside a control's range must not throw on load.</summary>
+    private static decimal Clamp(NumericUpDown c, double v) => Math.Clamp((decimal)v, c.Minimum, c.Maximum);
+
+    private void SaveDefaults()
+    {
+        try
+        {
+            CollectSettings().Save(_iniPath.Text, out string used);
+            Log($"Saved as the default: {used}");
+        }
+        catch (Exception ex)
+        {
+            Log("ERROR saving the settings: " + ex.Message);
+            MessageBox.Show(this,
+                $"Could not write the settings file:\n\n{ex.Message}\n\n" +
+                "If this program sits somewhere you cannot write to, put a writable path in the " +
+                "'Settings file' box and try again.",
+                Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private void ResetDefaults()
+    {
+        ApplySettings(new AppSettings());
+        Log("Back to the built-in defaults.");
+
+        string path = AppSettings.Resolve(string.IsNullOrWhiteSpace(_iniPath.Text) ? null : _iniPath.Text.Trim());
+        bool stub = !string.Equals(path, AppSettings.DefaultPath, StringComparison.OrdinalIgnoreCase)
+                    && File.Exists(AppSettings.DefaultPath);
+        if (!File.Exists(path) && !stub) return;
+
+        // The saved file would otherwise come back on the next start, so offer to remove it, and ask
+        // first because it is the user's file.
+        if (MessageBox.Show(this, $"Also delete the saved settings file?\n\n{path}",
+                            "Reset", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+        {
+            Log("Kept the saved file. Press 'Save as default' to overwrite it with these settings.");
+            return;
+        }
+        try
+        {
+            if (File.Exists(path)) { File.Delete(path); Log($"Deleted {path}"); }
+            // Remove the pointer too, or the next start would look for a file that is gone.
+            if (stub) { File.Delete(AppSettings.DefaultPath); Log($"Deleted {AppSettings.DefaultPath}"); }
+            _iniPath.Text = "";
+        }
+        catch (Exception ex) { Log("ERROR deleting the settings file: " + ex.Message); }
     }
 
     private void UpdateTiltEnabled()
