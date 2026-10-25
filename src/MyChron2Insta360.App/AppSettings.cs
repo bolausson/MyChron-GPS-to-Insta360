@@ -8,8 +8,9 @@ namespace MyChron2Insta360.App;
 /// exe ("MyChron2Insta360.ini" unless another path is given).
 ///
 /// Keys are named after the command line options they stand for, so a file written by the GUI reads as
-/// documentation of the equivalent command, which is what makes it useful for scripting. Nothing is
-/// written unless you ask for it: with no ini present the program behaves exactly as it always has.
+/// documentation of the equivalent command, which is what makes it useful for scripting. The exception
+/// is the Sources pickers' default folder, which only the GUI has. Nothing is written unless you ask for
+/// it: with no ini present the program behaves exactly as it always has.
 /// </summary>
 internal sealed class AppSettings
 {
@@ -35,6 +36,22 @@ internal sealed class AppSettings
     public bool ToInvertSteering = true;
     public bool ToInvertLateral;
     public bool PreferXrk = true;
+
+    // Sources pickers, GUI only
+    /// <summary>Where RaceStudio 3 keeps the sessions it downloads, unless told otherwise.</summary>
+    public const string RaceStudioDataDir = @"C:\AIM_SPORT\RaceStudio3\user\data";
+    public string SourcesDir = RaceStudioDataDir;
+    public bool AlwaysOpenSourcesDir;
+
+    /// <summary>
+    /// The Sources pickers' default folder: the one typed, or RaceStudio's when the box is empty.
+    /// Surrounding quotes are dropped, because Explorer's "Copy as path" adds them.
+    /// </summary>
+    public static string SourcesDirOrDefault(string? typed)
+    {
+        string dir = (typed ?? "").Trim().Trim('"').Trim();
+        return dir.Length > 0 ? dir : RaceStudioDataDir;
+    }
 
     /// <summary>Where the settings live by default: beside the exe, named after it.</summary>
     public static string DefaultPath
@@ -125,6 +142,8 @@ internal sealed class AppSettings
                     case "to-invert-steering": s.ToInvertSteering = Bool(value, s.ToInvertSteering); break;
                     case "to-invert-lateral": s.ToInvertLateral = Bool(value, s.ToInvertLateral); break;
                     case "prefer-xrk": s.PreferXrk = Bool(value, s.PreferXrk); break;
+                    case "sources-dir": s.SourcesDir = value; break;
+                    case "always-open-sources-dir": s.AlwaysOpenSourcesDir = Bool(value, s.AlwaysOpenSourcesDir); break;
                 }
             }
         }
@@ -135,6 +154,19 @@ internal sealed class AppSettings
     public void Save(string? path, out string used)
     {
         used = string.IsNullOrWhiteSpace(path) ? DefaultPath : path!;
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(used))!);
+        File.WriteAllText(used, ToIni(), new UTF8Encoding(false));
+
+        // Saving somewhere else leaves a pointer at the default location, so the next start finds it.
+        if (!string.Equals(Path.GetFullPath(used), Path.GetFullPath(DefaultPath), StringComparison.OrdinalIgnoreCase))
+            File.WriteAllText(DefaultPath,
+                "# This program's settings live elsewhere. Edit or delete the line below to change that.\r\n" +
+                $"settings-file = {Path.GetFullPath(used)}\r\n", new UTF8Encoding(false));
+    }
+
+    /// <summary>The file's text, exactly as <see cref="Save"/> writes it.</summary>
+    internal string ToIni()
+    {
         var ci = CultureInfo.InvariantCulture;
         var sb = new StringBuilder();
         sb.AppendLine("# MyChron2Insta360 settings.");
@@ -159,15 +191,12 @@ internal sealed class AppSettings
         sb.AppendLine($"to-rate = {ToRate.ToString("0.###", ci)}");
         sb.AppendLine($"to-invert-steering = {Low(ToInvertSteering)}");
         sb.AppendLine($"to-invert-lateral = {Low(ToInvertLateral)}");
-
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(used))!);
-        File.WriteAllText(used, sb.ToString(), new UTF8Encoding(false));
-
-        // Saving somewhere else leaves a pointer at the default location, so the next start finds it.
-        if (!string.Equals(Path.GetFullPath(used), Path.GetFullPath(DefaultPath), StringComparison.OrdinalIgnoreCase))
-            File.WriteAllText(DefaultPath,
-                "# This program's settings live elsewhere. Edit or delete the line below to change that.\r\n" +
-                $"settings-file = {Path.GetFullPath(used)}\r\n", new UTF8Encoding(false));
+        sb.AppendLine();
+        sb.AppendLine("# GUI only: where 'Add folder...' and 'Add file(s)...' start until Windows remembers");
+        sb.AppendLine("# a pick, or every time when always-open-sources-dir is true");
+        sb.AppendLine($"sources-dir = {SourcesDir}");
+        sb.AppendLine($"always-open-sources-dir = {Low(AlwaysOpenSourcesDir)}");
+        return sb.ToString();
     }
 
     private static string Low(bool b) => b ? "true" : "false";

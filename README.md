@@ -167,8 +167,8 @@ This export reads a RaceStudio session folder, so it does not apply to Insta360 
 
 The GUI starts with sensible defaults. Once you have it set up the way you like, press **Save as
 default** and it comes back that way next time: output folder, which formats to write, the IMU and
-output rates, tilt correction, merge and trim. **Reset** puts the built-in defaults back, and offers to
-delete the saved file so the next start is clean too.
+output rates, tilt correction, merge and trim, and the default sources path with its tick box. **Reset**
+puts the built-in defaults back, and offers to delete the saved file so the next start is clean too.
 
 Settings live in a small ini file called **`MyChron2Insta360.ini`**, beside the program.
 
@@ -189,7 +189,8 @@ sitting there unreferenced. If the pointer names a file that is not there, say o
 sync has not caught up, it says so and uses the built-in defaults rather than pretending.
 
 The file is plain text and every key is named after the command line option it stands for, so it doubles
-as a note of the equivalent command:
+as a note of the equivalent command. The last two, `sources-dir` and `always-open-sources-dir`, belong
+to the GUI alone:
 
 ```ini
 [MyChron2Insta360]
@@ -200,6 +201,8 @@ rate = native
 imu-hz = 50
 tilt = auto
 merge = false
+sources-dir = C:\AIM_SPORT\RaceStudio3\user\data
+always-open-sources-dir = false
 ```
 
 **The command line reads it too**, which makes scripting shorter: put the common options in a file and
@@ -288,6 +291,14 @@ dotnet publish src/MyChron2Insta360.App -c Release
 **GUI:** double-click `MyChron2Insta360.exe`, then drag folders or files onto the list, or add them with
 *Add folder…* / *Add file(s)…*. *Remove* and *Clear* edit the list; nothing runs until you press *Convert*.
 
+Those two pickers start in the **Default sources path**, RaceStudio's data folder
+(`C:\AIM_SPORT\RaceStudio3\user\data`) unless you point it elsewhere: type a path, use *Browse…*, or
+drop a folder on the box. They open there until you have picked something; from then on Windows reopens
+them wherever you last picked from, as it does for any program. Windows keeps that memory itself, across
+restarts, so changing the path does not move them. Tick **Make file picker always open this path** to
+start in the default path every time instead. If the folder does not exist, they open wherever Windows
+chooses and the log says so. *Save as default* keeps the path and the tick box.
+
 **CLI:**
 
 ```powershell
@@ -367,6 +378,18 @@ publicly documented format, with no external tool required; the layout was cross
 and the output verified against ExifTool on real files.
 
 ## Changes
+
+### 1.3.3
+
+- New **Default sources path** above the Sources list, RaceStudio's data folder
+  (`C:\AIM_SPORT\RaceStudio3\user\data`) out of the box. *Add folder…* and *Add file(s)…* open there
+  until you have picked something, then reopen wherever you last picked from, as Windows normally does.
+  Tick **Make file picker always open this path** to start there every time. *Save as default* keeps
+  both.
+- The Sources pickers keep their own memory of where you last picked from, separate from the output
+  folder's *Browse…*, so choosing an output folder does not change where they open next.
+- The window scrolls when it is taller than the screen, for example on a 1080p laptop at 150% scaling,
+  so *Convert* stays within reach.
 
 ### 1.3.2
 

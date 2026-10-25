@@ -12,6 +12,9 @@ namespace MyChron2Insta360.App;
 /// </summary>
 public sealed class MainForm : Form
 {
+    private readonly TextBox _sourcesDir = new() { Text = AppSettings.RaceStudioDataDir, PlaceholderText = AppSettings.RaceStudioDataDir };
+    private readonly CheckBox _alwaysSourcesDir = new() { Text = "Make file picker always open this path", Checked = false };
+    private readonly HashSet<string> _missingSourcesDirs = new(StringComparer.OrdinalIgnoreCase);
     private readonly ListBox _inputs = new() { SelectionMode = SelectionMode.MultiExtended, HorizontalScrollbar = true, IntegralHeight = false };
     private readonly Label _resolved = new() { AutoSize = false, ForeColor = Color.DimGray };
     private readonly TextBox _outDir = new() { PlaceholderText = "(same folder as input)" };
@@ -38,7 +41,7 @@ public sealed class MainForm : Form
     public MainForm(string[]? preload = null)
     {
         Text = "MyChron → Insta360";
-        ClientSize = new Size(640, 822);
+        ClientSize = new Size(640, 886);
         MinimumSize = new Size(560, 620);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9F);
@@ -49,6 +52,20 @@ public sealed class MainForm : Form
 
         const int x = 16, labelW = 130, ctrlX = 150, ctrlW = 474;
         int y = 16;
+
+        AddLabel("Default sources path:", x, y + 4, labelW);
+        _sourcesDir.SetBounds(ctrlX, y, ctrlW - 90, 26);
+        _sourcesDir.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+        // A folder dropped here sets the path; without this the form would take it as a source.
+        _sourcesDir.AllowDrop = true;
+        _sourcesDir.DragEnter += (_, e) => { if (e.Data?.GetDataPresent(DataFormats.FileDrop) == true) e.Effect = DragDropEffects.Copy; };
+        _sourcesDir.DragDrop += OnDropSourcesDir;
+        Controls.Add(_sourcesDir);
+        AddRightButton("Browse…", ctrlX + ctrlW - 84, y - 1, 84, BrowseSourcesFolder);
+        y += 30;
+        _alwaysSourcesDir.SetBounds(ctrlX, y, 340, 24);
+        Controls.Add(_alwaysSourcesDir);
+        y += 34;
 
         AddLabel("Sources:", x, y + 4, labelW);
         _inputs.SetBounds(ctrlX, y, ctrlW, 74);
@@ -175,6 +192,13 @@ public sealed class MainForm : Form
         _log.Font = new Font("Consolas", 8.5F);
         Controls.Add(_log);
 
+        // Taller than some screens: a 1080p laptop at 150% leaves this program 672 px. Open no taller
+        // than the screen and scroll, rather than leave Convert under the taskbar.
+        AutoScroll = true;
+        AutoScrollMinSize = new Size(0, _log.Top + 60);
+        Rectangle work = Screen.FromPoint(Cursor.Position).WorkingArea;
+        if (Height > work.Height) ClientSize = new Size(ClientSize.Width, ClientSize.Height - (Height - work.Height));
+
         Log($"v{AppInfo.Version} ready. Add or drop MyChron .xrk / .xrz files, RaceStudio '_CSV' folders, " +
             "or Insta360 videos (.insv / .lrv).");
 
@@ -196,6 +220,8 @@ public sealed class MainForm : Form
         }
 
         if (preload is { Length: > 0 }) AddInputs(preload);
+        // Start on the Sources list, as before, not in the path box with its text selected.
+        ActiveControl = _inputs;
     }
 
     private void AddLabel(string text, int left, int top, int width) =>
@@ -249,8 +275,13 @@ public sealed class MainForm : Form
 
     private void AddViaFolderDialog()
     {
-        using var dlg = new FolderBrowserDialog { Description = "Add a session '_CSV' folder (or a parent folder of several)" };
-        if (dlg.ShowDialog(this) == DialogResult.OK) AddInputs(new[] { dlg.SelectedPath });
+        try
+        {
+            string? folder = SourcePicker.PickFolder(this, "Add a session '_CSV' folder (or a parent folder of several)",
+                                                     SourcesStart(), _alwaysSourcesDir.Checked);
+            if (folder is not null) AddInputs(new[] { folder });
+        }
+        catch (Exception ex) { PickerFailed(ex); }
     }
 
     private void AddViaFileDialog()
@@ -260,16 +291,54 @@ public sealed class MainForm : Form
         const string myChron = "_GPS_o.csv;_GPS.csv;Accelerometer*.csv;Gyro*.csv;" +
                                "Logger Temperature.csv;_laps_and_splits.csv";
         const string video = "*.insv;*.lrv";
-        using var dlg = new OpenFileDialog
+        var filters = new[]
         {
-            Multiselect = true,
-            Filter = $"Supported telemetry|{logger};{myChron};{video}|" +
-                     $"MyChron logger file (*.xrk;*.xrz)|{logger}|" +
-                     $"MyChron / RaceStudio channels|{myChron}|" +
-                     $"Insta360 video (*.insv;*.lrv)|{video}|" +
-                     "All files (*.*)|*.*",
+            ("Supported telemetry", $"{logger};{myChron};{video}"),
+            ("MyChron logger file (*.xrk;*.xrz)", logger),
+            ("MyChron / RaceStudio channels", myChron),
+            ("Insta360 video (*.insv;*.lrv)", video),
+            ("All files (*.*)", "*.*"),
         };
-        if (dlg.ShowDialog(this) == DialogResult.OK) AddInputs(dlg.FileNames);
+        try
+        {
+            var files = SourcePicker.PickFiles(this, filters, SourcesStart(), _alwaysSourcesDir.Checked);
+            if (files.Length > 0) AddInputs(files);
+        }
+        catch (Exception ex) { PickerFailed(ex); }
+    }
+
+    /// <summary>
+    /// The pickers' default folder, or null to leave the choice to Windows when it is not there. That
+    /// is said once per folder, not on every click.
+    /// </summary>
+    private string? SourcesStart()
+    {
+        string dir = AppSettings.SourcesDirOrDefault(_sourcesDir.Text);
+        if (SourcePicker.UsableFolder(dir) is { } usable) return usable;
+        if (_missingSourcesDirs.Add(dir))
+            Log($"Default sources path not found, so the picker opens where Windows chooses: {dir}");
+        return null;
+    }
+
+    private void PickerFailed(Exception ex)
+    {
+        Log("ERROR opening the file picker: " + ex.Message);
+        MessageBox.Show(this, ex.Message, "File picker failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+    }
+
+    private void OnDropSourcesDir(object? sender, DragEventArgs e)
+    {
+        if (e.Data?.GetData(DataFormats.FileDrop) is not string[] { Length: > 0 } items) return;
+        // A dropped file stands for the folder it is in.
+        _sourcesDir.Text = Directory.Exists(items[0]) ? items[0] : Path.GetDirectoryName(items[0]) ?? items[0];
+    }
+
+    private void BrowseSourcesFolder()
+    {
+        using var dlg = new FolderBrowserDialog { Description = "Pick the folder 'Add folder…' and 'Add file(s)…' open in" };
+        string dir = AppSettings.SourcesDirOrDefault(_sourcesDir.Text);
+        try { if (Directory.Exists(dir)) dlg.SelectedPath = dir; } catch { }
+        if (dlg.ShowDialog(this) == DialogResult.OK) _sourcesDir.Text = dlg.SelectedPath;
     }
 
     /// <summary>Show how many GPS sessions the current list resolves to.</summary>
@@ -355,6 +424,8 @@ public sealed class MainForm : Form
             Tilt = !_tilt.Checked ? "off" : typedTilt.Length == 0 ? "auto" : typedTilt,
             Merge = _merge.Checked,
             Trim = _trim.Checked,
+            SourcesDir = AppSettings.SourcesDirOrDefault(_sourcesDir.Text),
+            AlwaysOpenSourcesDir = _alwaysSourcesDir.Checked,
         };
     }
 
@@ -378,6 +449,8 @@ public sealed class MainForm : Form
         _tiltDeg.Text = off || s.Tilt.Equals("auto", StringComparison.OrdinalIgnoreCase) ? "" : s.Tilt;
         _merge.Checked = s.Merge;
         _trim.Checked = s.Trim;
+        _sourcesDir.Text = s.SourcesDir;
+        _alwaysSourcesDir.Checked = s.AlwaysOpenSourcesDir;
 
         UpdateTiltEnabled();
         UpdateResolved();
