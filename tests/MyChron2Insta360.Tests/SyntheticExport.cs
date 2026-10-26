@@ -18,11 +18,23 @@ internal sealed class SyntheticExport : IDisposable
     public string OutDir { get; }
     public double TiltDeg { get; }
 
+    /// <summary>GPS time of week of the session's time zero, so two exports can be minutes apart.</summary>
+    public long ItowZeroMs { get; }
+    /// <summary>How long after the logger's time zero the first GPS fix comes, as on a real MyChron.</summary>
+    public double GpsDelayS { get; }
+
     /// <param name="tiltDeg">Mount tilt to inject, as a rotation about the lateral (Y) axis.</param>
     /// <param name="channels">Extra per-channel files: name, units and a value for each sample.</param>
     public SyntheticExport(double tiltDeg = 13.0, int seconds = 60,
                            params (string Name, string Units, Func<int, double> Value)[] channels)
+        : this(tiltDeg, seconds, itowZeroMs: 58938920, gpsDelayS: 0, channels) { }
+
+    public SyntheticExport(double tiltDeg, int seconds, long itowZeroMs, double gpsDelayS = 0,
+                           (string Name, string Units, Func<int, double> Value)[]? channels = null)
     {
+        channels ??= Array.Empty<(string, string, Func<int, double>)>();
+        ItowZeroMs = itowZeroMs;
+        GpsDelayS = gpsDelayS;
         TiltDeg = tiltDeg;
         Root = Path.Combine(Path.GetTempPath(), "m2i-tests", Guid.NewGuid().ToString("N"));
         Folder = Path.Combine(Root, "Synthetic_Session_CSV");
@@ -65,13 +77,13 @@ internal sealed class SyntheticExport : IDisposable
     {
         var ci = CultureInfo.InvariantCulture;
         var sb = new StringBuilder("time, itow, lat, lon, alt, speed, accuracy\n");
-        int n = (int)(seconds * GpsHz);
+        int n = (int)((seconds - GpsDelayS) * GpsHz);
         for (int i = 0; i < n; i++)
         {
-            double t = i / GpsHz;
+            double t = GpsDelayS + i / GpsHz;
             double speed = 20 + 5 * Math.Sin(t / 5);                 // m/s, so the km/h scaling is visible
             sb.Append(t.ToString("0.000000", ci)).Append(", ")
-              .Append((58938920 + (long)(t * 1000)).ToString(ci)).Append(", ")
+              .Append((ItowZeroMs + (long)Math.Round(t * 1000)).ToString(ci)).Append(", ")
               .Append((50.839 + t * 1e-5).ToString("0.00000000", ci)).Append(", ")
               .Append((13.444 + t * 1e-5).ToString("0.00000000", ci)).Append(", ")
               .Append((560 + Math.Sin(t / 10)).ToString("0.0000", ci)).Append(", ")

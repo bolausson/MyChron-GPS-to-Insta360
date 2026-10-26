@@ -134,7 +134,7 @@ public sealed class MainForm : Form
             "GPX: GPS track only (position, altitude, speed, time). Best for maps and Insta360.\r\n" +
             "FIT: GPS plus accelerometer/gyro, temperature and lap splits (where available).\r\n" +
             "IMU CSV: accelerometer (g) and gyro (deg/s) per sample, for analysis in other apps.\r\n" +
-            "Telemetry Overlay: one wide CSV with every logged channel (MyChron sessions only).";
+            "Telemetry Overlay: one wide CSV with every logged channel (MyChron, or a .vbo's GPS).";
         Controls.Add(_formatHelp);
         y += 72;
 
@@ -200,7 +200,7 @@ public sealed class MainForm : Form
         if (Height > work.Height) ClientSize = new Size(ClientSize.Width, ClientSize.Height - (Height - work.Height));
 
         Log($"v{AppInfo.Version} ready. Add or drop MyChron .xrk / .xrz files, RaceStudio '_CSV' folders, " +
-            "or Insta360 videos (.insv / .lrv).");
+            "Dragy .vbo files, or Insta360 videos (.insv / .lrv).");
 
         // Saved defaults, if the user ever pressed "Save as default".
         var saved = AppSettings.Load(null, out string iniUsed, out string? iniError);
@@ -277,7 +277,7 @@ public sealed class MainForm : Form
     {
         try
         {
-            string? folder = SourcePicker.PickFolder(this, "Add a session '_CSV' folder (or a parent folder of several)",
+            string? folder = SourcePicker.PickFolder(this, "Add a folder of .xrk / .vbo files or Insta360 videos, a session '_CSV' folder, or a parent folder of several",
                                                      SourcesStart(), _alwaysSourcesDir.Checked);
             if (folder is not null) AddInputs(new[] { folder });
         }
@@ -291,11 +291,13 @@ public sealed class MainForm : Form
         const string myChron = "_GPS_o.csv;_GPS.csv;Accelerometer*.csv;Gyro*.csv;" +
                                "Logger Temperature.csv;_laps_and_splits.csv";
         const string video = "*.insv;*.lrv";
+        const string vbo = "*.vbo";
         var filters = new[]
         {
-            ("Supported telemetry", $"{logger};{myChron};{video}"),
+            ("Supported telemetry", $"{logger};{myChron};{vbo};{video}"),
             ("MyChron logger file (*.xrk;*.xrz)", logger),
             ("MyChron / RaceStudio channels", myChron),
+            ("Dragy / VBOX GPS log (*.vbo)", vbo),
             ("Insta360 video (*.insv;*.lrv)", video),
             ("All files (*.*)", "*.*"),
         };
@@ -398,7 +400,8 @@ public sealed class MainForm : Form
                 : src.Info?.StartLocal,
         };
         string path = basePath + "_TelemetryOverlay.csv";
-        Log($"  Telemetry Overlay CSV, {channels.Count} channel(s) found:");
+        Log(channels.Count > 0 ? $"  Telemetry Overlay CSV, {channels.Count} channel(s) found:"
+                               : "  Telemetry Overlay CSV, GPS only:");
         TelemetryOverlayCsv.Write(path, src.Gps, imu, channels, laps, opt, Log);
         return path;
     }
@@ -629,17 +632,7 @@ public sealed class MainForm : Form
                     var imu = new List<ImuSample>();
                     foreach (var l in loaded) imu.AddRange(l.Tel.Imu);
                     imu.Sort((a, b) => (a.Utc ?? DateTime.MinValue).CompareTo(b.Utc ?? DateTime.MinValue));
-                    if (imuHz > 0)
-                    {
-                        var thin = new List<ImuSample>(); DateTime? last = null;
-                        foreach (var s in imu)
-                        {
-                            if (s.Utc is not DateTime u) continue;
-                            if (last is DateTime lu && (u - lu).TotalSeconds < 1.0 / imuHz - 1e-9) continue;
-                            last = u; thin.Add(s);
-                        }
-                        imu = thin;
-                    }
+                    if (imuHz > 0) imu = Cli.DownsampleByUtc(imu, imuHz);
                     DateTime? start = segs.Count > 0 ? segs[0][0].Utc : imu.FirstOrDefault()?.Utc;
                     string baseName = "merged-" + (start is DateTime st ? st.ToString("yyyyMMdd-HHmmss") : "unknown");
                     string dir = outDir ?? Path.GetDirectoryName(loaded[0].File)!;
@@ -696,7 +689,7 @@ public sealed class MainForm : Form
         var inputs = InputPaths();
         if (inputs.Count == 0)
         {
-            MessageBox.Show(this, "Add at least one RaceStudio '_CSV' folder (or a parent folder) or a _GPS csv.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, "Add at least one source: an .xrk / .xrz, a RaceStudio '_CSV' folder, a .vbo, an Insta360 video, or a folder holding them.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
         bool gpx = _gpx.Checked, fit = _fit.Checked, imuCsv = _imuCsv.Checked, toCsv = _toCsv.Checked;
@@ -742,9 +735,11 @@ public sealed class MainForm : Form
         {
             var result = await Task.Run(() =>
             {
-                var sources = MyChronSources.LoadAll(inputs);
+                var sources = MyChronSources.LoadAll(inputs, log: Log);
                 var sessions = sources.Select(s => s.Gps).ToList();
                 var sessionLines = sources.Select(s => "  " + s.Describe()).ToList();
+                foreach (var d in inputs.Where(i => File.Exists(i) && VboReader.IsDlapFile(i))) Log(VboReader.DlapNote(d));
+                if (imuCsv && sources.Any(s => s.FromVbo)) Log(VboReader.NoImuNote);
                 if (outDir is not null) Directory.CreateDirectory(outDir);
 
                 var written = new List<string>();
@@ -763,15 +758,21 @@ public sealed class MainForm : Form
                     var allImu = new List<ImuSample>();
                     foreach (var src in sources)
                     {
+                        DateTime? startUtc = TrackBuilder.SessionStartUtc(src.Gps, opt);
                         var im = src.LoadImu();
                         tiltPlan.ApplyTo(im, Log);
                         if (imuHz > 0) im = ImuCsvWriter.Downsample(im, imuHz);
+                        // Each session on its own clock: unstamped, the FIT and the IMU CSV would place
+                        // every session's IMU from the first one's start.
+                        if (startUtc is DateTime su) foreach (var v in im) v.Utc = su.AddSeconds(v.ElapsedS);
                         // The AiM container describes one session, so this export stays per session
                         // even when the GPX and FIT are merged.
                         if (toCsv)
-                            written.Add(WriteTelemetryOverlay(src, im, Path.Combine(dir, src.BaseName), opt.StartUtc));
-                        allImu.AddRange(im);
+                            written.Add(WriteTelemetryOverlay(src, im, Path.Combine(dir, src.BaseName), startUtc));
+                        // A session with no clock cannot be placed on the merged timeline.
+                        if (startUtc is not null) allImu.AddRange(im);
                     }
+                    allImu.Sort((a, b) => (a.Utc ?? DateTime.MinValue).CompareTo(b.Utc ?? DateTime.MinValue));
                     if (gpx) { var p = basePath + ".gpx"; GpxWriter.Write(p, segs, name); written.Add(p); }
                     if (fit)
                     {
@@ -787,11 +788,12 @@ public sealed class MainForm : Form
                     {
                         var segs = TrackBuilder.Build(new[] { src.Gps }, opt);
                         totalPoints += opt.TotalPoints;
-                        string dir = outDir ?? (src.FromXrk ? Path.GetDirectoryName(src.Path)! : src.Path);
+                        string dir = outDir ?? src.OutputFolder;
                         string basePath = Path.Combine(dir, src.BaseName);
 
-                        // IMU, laps and temperature ride along into the FIT and the IMU CSV.
-                        DateTime? startUtc = opt.StartUtc;
+                        // IMU, laps and temperature ride along into the FIT and the IMU CSV, timed from
+                        // the session's own start, which trimming the track does not move.
+                        DateTime? startUtc = TrackBuilder.SessionStartUtc(src.Gps, opt);
                         var imu = src.LoadImu();
                         tiltPlan.ApplyTo(imu, Log);   // level before any downsample, so every output agrees
                         if (imuHz > 0) imu = ImuCsvWriter.Downsample(imu, imuHz);
@@ -820,8 +822,11 @@ public sealed class MainForm : Form
 
             Log($"Found {result.count} session(s):");
             foreach (var s in result.sessionLines) Log(s);
-            Log($"Time base: {(opt.UsedItow ? "iTOW (exact GPS time)" : "relative, sync will need a nudge")}");
-            Log($"Output rate: {opt.EffectiveHz:0.#} Hz{(opt.TargetHz > 0 ? " (downsampled)" : " (native)")}");
+            Log($"Time base: {opt.DescribeTimeBase()}");
+            Log($"Output rate: {opt.EffectiveHz:0.#} Hz {(opt.Downsampled ? "(downsampled)" : "(native)")}");
+            foreach (var o in opt.Overlaps)
+                Log($"Warning: {o}. They are two recordings of the same stretch, which one merged file " +
+                    "shows twice; untick Merge to convert them separately.");
             Log(result.merged
                 ? $"Merged → {result.totalPoints} track points."
                 : $"{result.count} file set(s), {result.totalPoints} track points total.");

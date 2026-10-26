@@ -12,6 +12,8 @@ public sealed class GpsSample
     public double Alt;        // metres
     public double SpeedMs;    // metres/second (RaceStudio GPS speed is already m/s)
     public double AccuracyM;  // reported position accuracy, metres
+    public double HeadingDeg = double.NaN;   // course over ground, degrees true; NaN when not recorded
+    public double Satellites = double.NaN;   // satellites in the fix; NaN when not recorded
 }
 
 public sealed class GpsSession
@@ -20,6 +22,11 @@ public sealed class GpsSession
     public string Name { get; set; } = "Session";
     public DateTime? DateHint { get; set; }   // rough date (UTC) used only to pick the GPS week for iTOW
     public int? GpsWeek { get; set; }         // exact GPS week when the source supplies it (xrk does)
+    /// <summary>
+    /// UTC at TimeRel 0, for a source that states UTC itself (a .vbo) rather than GPS time. It wins over
+    /// iTOW, so neither a GPS week nor leap seconds come into it.
+    /// </summary>
+    public DateTime? StartUtc { get; set; }
     public string SourceFile { get; set; } = "";
     public double NativeHz { get; set; }
 }

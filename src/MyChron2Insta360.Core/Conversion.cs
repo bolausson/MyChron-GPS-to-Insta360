@@ -18,7 +18,10 @@ public sealed class ConversionOptions
     /// <summary>Speed (m/s) below which a point counts as "standstill" for trimming (~2 km/h).</summary>
     public double StandstillSpeedMs { get; set; } = 0.6;
 
-    /// <summary>Override the date used to resolve the GPS week (else taken from each folder path / file time).</summary>
+    /// <summary>
+    /// Override the date used to resolve the GPS week (else taken from each folder path / file time).
+    /// A .vbo, which records only the time of day, takes it as the UTC date of its first fix instead.
+    /// </summary>
     public DateTime? DateOverrideUtc { get; set; }
 
     /// <summary>GPS - UTC leap seconds applied to iTOW.</summary>
@@ -31,6 +34,21 @@ public sealed class ConversionOptions
     public DateTime? StartUtc { get; set; }
     public DateTime? EndUtc { get; set; }
     public bool UsedItow { get; set; }
+    /// <summary>A session took its clock from the UTC its file states (a .vbo).</summary>
+    public bool UsedFileUtc { get; set; }
+    /// <summary>The fixed rate really dropped fixes; asking for the native rate or more does not.</summary>
+    public bool Downsampled { get; set; }
+    /// <summary>Sessions in one build that cover the same time, which a merge cannot show as one track.</summary>
+    public List<string> Overlaps { get; } = new();
+
+    /// <summary>Where the timestamps came from, for the log.</summary>
+    public string DescribeTimeBase() => (UsedItow, UsedFileUtc) switch
+    {
+        (true, true) => "iTOW (exact GPS time), and the UTC stated in the .vbo",
+        (true, false) => "iTOW (exact GPS time)",
+        (false, true) => "the UTC stated in the .vbo",
+        _ => "relative (no GPS time), sync will need a nudge",
+    };
 }
 
 /// <summary>One output track point with an absolute UTC timestamp.</summary>
@@ -54,37 +72,35 @@ public static class TrackBuilder
     public static List<List<TrackPoint>> Build(IReadOnlyList<GpsSession> sessions, ConversionOptions opt)
     {
         var segments = new List<List<TrackPoint>>();
-        opt.UsedItow = false;
+        var names = new Dictionary<List<TrackPoint>, string>(ReferenceEqualityComparer.Instance);
         double? firstNativeHz = null;
 
         foreach (var session in sessions)
         {
             firstNativeHz ??= session.NativeHz;
-            bool haveItow = session.Samples.Any(s => !double.IsNaN(s.ItowMs) && s.ItowMs > 0);
+            // A .vbo states UTC outright, so it needs neither a GPS week nor leap seconds.
+            DateTime? fileUtc = session.StartUtc;
+            bool haveItow = fileUtc is null && session.Samples.Any(s => !double.IsNaN(s.ItowMs) && s.ItowMs > 0);
             // An xrk carries the GPS week itself, so no calendar hint is needed to place the iTOW.
             int? week = opt.DateOverrideUtc is null ? session.GpsWeek : null;
             DateTime? dateHint = opt.DateOverrideUtc ?? session.DateHint;
-            if (haveItow && week is null && dateHint is null)
+            var usable = session.Samples.Where(s => Usable(s, opt)).ToList();
+            // A session without a single fix (the GPS never locked) has nothing to place, so it is not an error.
+            if (usable.Count > 0 && fileUtc is null && week is null && dateHint is null)
                 throw new InvalidOperationException($"Could not determine the date for '{Path.GetFileName(session.SourceFile)}'.");
             if (haveItow) opt.UsedItow = true;
+            if (fileUtc is not null) opt.UsedFileUtc = true;
 
-            double minInterval = opt.TargetHz > 0 ? 1.0 / opt.TargetHz : 0; // 0 => keep every native sample
-            double lastKept = double.NegativeInfinity;
-
-            var pts = new List<TrackPoint>();
-            foreach (var s in session.Samples)
+            var pts = new List<TrackPoint>(usable.Count);
+            foreach (var s in Thinning.ToRate(usable, s => s.TimeRel, opt.TargetHz))
             {
-                if (double.IsNaN(s.Lat) || double.IsNaN(s.Lon)) continue;
-                if (s.Lat == 0 && s.Lon == 0) continue;
-                if (Math.Abs(s.Lat) > 90 || Math.Abs(s.Lon) > 180) continue;
-                if (opt.MaxAccuracyM > 0 && !double.IsNaN(s.AccuracyM) && s.AccuracyM > opt.MaxAccuracyM) continue;
-                if (minInterval > 0 && s.TimeRel - lastKept < minInterval - 1e-6) continue;
-                lastKept = s.TimeRel;
-
-                DateTime utc = haveItow && !double.IsNaN(s.ItowMs) && s.ItowMs > 0
-                    ? (week is int w ? ItowTime.FromWeek(w, s.ItowMs, opt.LeapSeconds)
-                                     : ItowTime.ToUtc(s.ItowMs, dateHint!.Value, opt.LeapSeconds))
-                    : dateHint!.Value.Date.AddSeconds(s.TimeRel); // degraded fallback
+                // Rounded to the tick: AddSeconds truncates, and TimeRel is often a hair under its value,
+                // which put every other point of a .vbo a millisecond early.
+                DateTime utc = fileUtc is DateTime f0 ? f0.AddTicks((long)Math.Round(s.TimeRel * TimeSpan.TicksPerSecond))
+                    : haveItow && !double.IsNaN(s.ItowMs) && s.ItowMs > 0
+                        ? (week is int w ? ItowTime.FromWeek(w, s.ItowMs, opt.LeapSeconds)
+                                         : ItowTime.ToUtc(s.ItowMs, dateHint!.Value, opt.LeapSeconds))
+                        : dateHint!.Value.Date.AddSeconds(s.TimeRel); // degraded fallback
                 utc = DateTime.SpecifyKind(utc, DateTimeKind.Utc).AddSeconds(opt.ManualOffsetSeconds);
 
                 pts.Add(new TrackPoint
@@ -94,25 +110,74 @@ public static class TrackBuilder
                     Lon = s.Lon,
                     EleM = double.IsNaN(s.Alt) ? null : s.Alt,
                     SpeedMs = double.IsNaN(s.SpeedMs) ? null : s.SpeedMs,
-                    HeadingDeg = null,
+                    HeadingDeg = double.IsNaN(s.HeadingDeg) ? null : s.HeadingDeg,
                 });
             }
 
             if (opt.TrimStandstill && pts.Count > 0)
                 pts = TrimStandstill(pts, opt.StandstillSpeedMs);
             if (pts.Count > 0)
+            {
                 segments.Add(pts);
+                names[pts] = session.Name;
+            }
         }
 
         segments.Sort((a, b) => a[0].Utc.CompareTo(b[0].Utc)); // chronological across sessions
 
+        // Two recordings of the same stretch (a second logger on the same kart, say) cannot share one
+        // timeline: the merged file would run over it twice, back in time at the join.
+        for (int i = 1, last = 0; i < segments.Count; i++)
+        {
+            double overlap = (segments[last][^1].Utc - segments[i][0].Utc).TotalSeconds;
+            if (overlap > 1)
+                opt.Overlaps.Add($"'{names[segments[last]]}' and '{names[segments[i]]}' overlap by {overlap:0} s");
+            if (segments[i][^1].Utc > segments[last][^1].Utc) last = i;
+        }
+
         opt.SessionCount = segments.Count;
         opt.TotalPoints = segments.Sum(s => s.Count);
-        opt.EffectiveHz = opt.TargetHz > 0 ? opt.TargetHz : (firstNativeHz ?? 0);
+        // Asking for more than the file holds keeps every fix, so report what was really written.
+        double native = firstNativeHz ?? 0;
+        opt.Downsampled = opt.TargetHz > 0 && (native <= 0 || opt.TargetHz < native);
+        opt.EffectiveHz = opt.Downsampled ? opt.TargetHz : native;
         opt.StartUtc = segments.Count > 0 ? segments[0][0].Utc : null;
-        opt.EndUtc = segments.Count > 0 ? segments[^1][^1].Utc : null;
+        opt.EndUtc = segments.Count > 0 ? segments.Max(s => s[^1].Utc) : null;
         return segments;
     }
+
+    /// <summary>
+    /// UTC at a session's time zero, the instant its IMU, laps and temperature are measured from, with
+    /// the nudge applied just as it is to every fix. Trimming and downsampling do not move it, so those
+    /// streams stay on the track however the track itself was built.
+    /// </summary>
+    public static DateTime? SessionStartUtc(GpsSession session, ConversionOptions opt)
+    {
+        DateTime? start = session.StartUtc;
+        if (start is null)
+        {
+            // An xrk carries the GPS week, which fixes the instant without any calendar hint.
+            int? week = opt.DateOverrideUtc is null ? session.GpsWeek : null;
+            DateTime? dateHint = opt.DateOverrideUtc ?? session.DateHint;
+            var first = session.Samples.FirstOrDefault(g => !double.IsNaN(g.ItowMs) && g.ItowMs > 0);
+            if (first is not null && (week is not null || dateHint is not null))
+                start = (week is int w ? ItowTime.FromWeek(w, first.ItowMs, opt.LeapSeconds)
+                                       : ItowTime.ToUtc(first.ItowMs, dateHint!.Value, opt.LeapSeconds))
+                        .AddSeconds(-first.TimeRel);
+            else if (first is null && dateHint is DateTime d)
+                start = d.Date;   // the same degraded clock the track falls back to
+        }
+        return start is DateTime u ? DateTime.SpecifyKind(u, DateTimeKind.Utc).AddSeconds(opt.ManualOffsetSeconds) : null;
+    }
+
+    /// <summary>A fix with a real position: not missing, not the 0,0 a receiver reports before it locks.</summary>
+    public static bool HasFix(GpsSample s) =>
+        !double.IsNaN(s.Lat) && !double.IsNaN(s.Lon)
+        && !(s.Lat == 0 && s.Lon == 0)
+        && Math.Abs(s.Lat) <= 90 && Math.Abs(s.Lon) <= 180;
+
+    private static bool Usable(GpsSample s, ConversionOptions opt) =>
+        HasFix(s) && !(opt.MaxAccuracyM > 0 && !double.IsNaN(s.AccuracyM) && s.AccuracyM > opt.MaxAccuracyM);
 
     private static List<TrackPoint> TrimStandstill(List<TrackPoint> pts, double thresholdMs)
     {
@@ -121,5 +186,32 @@ public static class TrackBuilder
         while (end >= 0 && (pts[end].SpeedMs ?? 0) < thresholdMs) end--;
         if (start > end) return pts;
         return pts.GetRange(start, end - start + 1);
+    }
+}
+
+/// <summary>
+/// Thins a time series to a target rate by keeping the first sample in each slot of a regular grid.
+/// Spacing each kept sample from the previous one instead drifts low whenever the native period does
+/// not divide the target one: 25 Hz asked down to 10 Hz kept every third fix, 8.3 Hz.
+/// </summary>
+public static class Thinning
+{
+    /// <summary>The samples to keep, in order. 0 Hz, or a rate at or above the native one, keeps all.
+    /// The items must be in time order.</summary>
+    public static List<T> ToRate<T>(IReadOnlyList<T> items, Func<T, double> seconds, double hz)
+    {
+        if (hz <= 0 || items.Count == 0) return items.ToList();
+        double step = 1.0 / hz, origin = seconds(items[0]), due = origin;
+        var kept = new List<T>();
+        foreach (var item in items)
+        {
+            double t = seconds(item);
+            if (t < due - 1e-9) continue;
+            kept.Add(item);
+            // The slot after this sample, counted from the origin so rounding cannot build up, and
+            // straight past any gap rather than catching up afterwards with a burst.
+            due = origin + (Math.Floor((t - origin) / step + 1e-9) + 1) * step;
+        }
+        return kept;
     }
 }

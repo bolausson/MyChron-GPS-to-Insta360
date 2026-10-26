@@ -11,23 +11,11 @@ namespace MyChron2Insta360.Core;
 public static class ImuCsvWriter
 {
     /// <summary>
-    /// Reduce an IMU stream to at most <paramref name="targetHz"/> samples per second. The Insta360 IMU
-    /// runs at ~1 kHz, which makes very large files; 0 or a rate at/above the native one keeps everything.
+    /// Reduce an IMU stream to <paramref name="targetHz"/> samples per second. The Insta360 IMU runs at
+    /// ~1 kHz, which makes very large files; 0 or a rate at/above the native one keeps everything.
     /// </summary>
-    public static List<ImuSample> Downsample(IReadOnlyList<ImuSample> imu, double targetHz)
-    {
-        if (targetHz <= 0 || imu.Count == 0) return imu.ToList();
-        double minInterval = 1.0 / targetHz;
-        var outp = new List<ImuSample>(Math.Min(imu.Count, (int)(targetHz * 3600)));
-        double last = double.NegativeInfinity;
-        foreach (var s in imu)
-        {
-            if (s.ElapsedS - last < minInterval - 1e-9) continue;
-            last = s.ElapsedS;
-            outp.Add(s);
-        }
-        return outp;
-    }
+    public static List<ImuSample> Downsample(IReadOnlyList<ImuSample> imu, double targetHz) =>
+        Thinning.ToRate(imu, s => s.ElapsedS, targetHz);
 
     public static void Write(string path, IReadOnlyList<ImuSample> imu)
     {

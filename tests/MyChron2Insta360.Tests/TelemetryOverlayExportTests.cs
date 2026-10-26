@@ -201,6 +201,8 @@ public class TelemetryOverlayAliasTests
     [InlineData("InlineAcc", "g")]
     [InlineData("YawRate", "deg/s")]
     [InlineData("Battery", "V")]
+    [InlineData("GPS Heading", "deg")]         // what a .vbo adds
+    [InlineData("satellites", "sats")]
     public void Known_names_are_recognised(string header, string units) =>
         Assert.True(TelemetryOverlayAliases.Contains(header, units));
 

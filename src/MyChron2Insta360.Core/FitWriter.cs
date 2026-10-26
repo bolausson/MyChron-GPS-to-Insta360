@@ -155,10 +155,16 @@ public static class FitWriter
     /// </summary>
     private static void WriteImu(Encode encoder, IReadOnlyList<ImuSample> imu, System.DateTime fallbackStart)
     {
-        for (int i = 0; i < imu.Count; i += ImuBatch)
+        System.DateTime At(ImuSample s) => Utc(s.Utc ?? fallbackStart.AddSeconds(s.ElapsedS));
+        for (int i = 0, n; i < imu.Count; i += n)
         {
-            int n = System.Math.Min(ImuBatch, imu.Count - i);
-            System.DateTime t0 = Utc(imu[i].Utc ?? fallbackStart.AddSeconds(imu[i].ElapsedS));
+            System.DateTime t0 = At(imu[i]);
+            // A batch also ends where the next sample is out of reach of its 16-bit millisecond offset,
+            // across the stop between two merged sessions for instance, rather than be clamped to it.
+            n = 1;
+            while (n < ImuBatch && i + n < imu.Count
+                   && (At(imu[i + n]) - t0).TotalMilliseconds is >= 0 and <= 65535)
+                n++;
 
             var a = new AccelerometerDataMesg();
             a.SetTimestamp(new Dynastream.Fit.DateTime(t0));

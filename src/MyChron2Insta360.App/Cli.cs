@@ -138,11 +138,12 @@ internal static class Cli
                 }
             }
 
-            if (inputs.Count == 0) { Console.Error.WriteLine("Error: no input (a RaceStudio _CSV folder, a parent folder, or _GPS*.csv).\n"); PrintHelp(); return 2; }
+            if (inputs.Count == 0) { Console.Error.WriteLine("Error: no input (an .xrk/.xrz, a RaceStudio _CSV folder, a .vbo, an Insta360 video, or a folder holding them).\n"); PrintHelp(); return 2; }
             foreach (var inp in inputs)
                 if (!File.Exists(inp) && !Directory.Exists(inp)) { Console.Error.WriteLine($"Error: input not found: {inp}"); return 2; }
             var formats = ParseFormats(format, out string? formatError);
             if (formatError is not null) { Console.Error.WriteLine($"Error: {formatError}"); return 2; }
+            if (output is not null) output = OutputBase(output);
 
             if (verifyXrk) return VerifyXrk(inputs);
 
@@ -179,10 +180,14 @@ internal static class Cli
                 return RunInsta360(clips, output, outDir, formats, writeImuCsv, imuHz, merge, tiltPlan);
             }
 
-            var sources = MyChronSources.LoadAll(inputs, gps10, preferXrk: !noXrk);
+            var sources = MyChronSources.LoadAll(inputs, gps10, preferXrk: !noXrk, vboDateUtc: opt.DateOverrideUtc,
+                                                 log: Console.WriteLine);
             var sessions = sources.Select(s => s.Gps).ToList();
+            foreach (var d in inputs.Where(i => File.Exists(i) && VboReader.IsDlapFile(i)))
+                Console.WriteLine(VboReader.DlapNote(d));
             Console.WriteLine($"Found {sources.Count} session(s):");
             foreach (var s in sources) Console.WriteLine("  " + s.Describe());
+            if (writeImuCsv && sources.Any(s => s.FromVbo)) Console.WriteLine(VboReader.NoImuNote);
             if (outDir is not null) Directory.CreateDirectory(outDir);
 
             if (merge && sources.Count > 1)
@@ -190,16 +195,19 @@ internal static class Cli
                 Console.WriteLine("Mode: MERGE → one output file.");
                 var segs = TrackBuilder.Build(sessions, opt);
                 ReportBuild(opt);
+                foreach (var o in opt.Overlaps)
+                    Console.WriteLine($"Warning: {o}. They are two recordings of the same stretch, which one " +
+                                      "merged file shows twice; convert them without --merge.");
                 string primary = inputs[0];
                 string baseName = MergedBaseName(opt);
                 string dir = outDir ?? (Directory.Exists(primary) ? primary : Path.GetDirectoryName(sources[0].Gps.SourceFile)!);
                 string name = $"{baseName} ({sources.Count} sessions)";
                 string mergeBase = output ?? Path.Combine(dir, baseName);
-                WriteJob(segs, mergeBase, name, formats);
                 bool wantTo = formats.HasFlag(Outputs.TelemetryOverlay);
-                if (writeImuCsv || wantTo)
-                {
-                    var all = new List<ImuSample>();
+                // Each session's IMU on its own clock, for the merged FIT as much as for the IMU CSV:
+                // the FIT used to be written before the IMU was even loaded, so it carried none.
+                var all = new List<ImuSample>();
+                if (writeImuCsv || wantTo || formats.HasFlag(Outputs.Fit))
                     foreach (var src in sources)
                     {
                         var im = src.LoadImu();
@@ -210,16 +218,18 @@ internal static class Cli
                         if (wantTo)
                             WriteTelemetryOverlay(src, opt, im, Path.Combine(dir, src.BaseName),
                                                   toRate, toInvertSteering, toInvertLateral);
-                        if (SessionStartUtc(src.Gps, opt) is DateTime su) foreach (var x in im) x.Utc = su.AddSeconds(x.ElapsedS);
+                        // A session with no clock cannot be placed on the merged timeline.
+                        if (TrackBuilder.SessionStartUtc(src.Gps, opt) is not DateTime su) continue;
+                        foreach (var x in im) x.Utc = su.AddSeconds(x.ElapsedS);
                         all.AddRange(im);
                     }
-                    if (writeImuCsv && all.Count > 0)
-                    {
-                        all.Sort((a, b) => (a.Utc ?? DateTime.MinValue).CompareTo(b.Utc ?? DateTime.MinValue));
-                        string csv = mergeBase + "_imu.csv";
-                        ImuCsvWriter.Write(csv, all);
-                        Console.WriteLine($"Wrote {csv}  ({all.Count} IMU samples)");
-                    }
+                all.Sort((a, b) => (a.Utc ?? DateTime.MinValue).CompareTo(b.Utc ?? DateTime.MinValue));
+                WriteJob(segs, mergeBase, name, formats, new FitWriter.Extras { Imu = all.Count > 0 ? all : null });
+                if (writeImuCsv && all.Count > 0)
+                {
+                    string csv = mergeBase + "_imu.csv";
+                    ImuCsvWriter.Write(csv, all);
+                    Console.WriteLine($"Wrote {csv}  ({all.Count} IMU samples)");
                 }
             }
             else
@@ -229,7 +239,7 @@ internal static class Cli
                 {
                     var segs = TrackBuilder.Build(new[] { src.Gps }, opt);
                     string baseName = src.BaseName;
-                    string dir = outDir ?? (src.FromXrk ? Path.GetDirectoryName(src.Path)! : src.Path);
+                    string dir = outDir ?? src.OutputFolder;
                     string basePath = (output is not null && sources.Count == 1) ? output : Path.Combine(dir, baseName);
                     Console.WriteLine($"[{baseName}] {opt.TotalPoints} pts @ {opt.EffectiveHz:0.#} Hz" +
                                       (opt.StartUtc is DateTime t0 ? $"  {t0:HH:mm:ss}Z.." + (opt.EndUtc is DateTime t1 ? $"{t1:HH:mm:ss}Z" : "") : ""));
@@ -256,11 +266,11 @@ internal static class Cli
         }
     }
 
-    /// <summary>Load a MyChron session's IMU, laps and temperature, all stamped to absolute UTC.</summary>
+    /// <summary>Load a session's IMU, laps and temperature, all stamped to absolute UTC. A .vbo has none.</summary>
     private static FitWriter.Extras LoadMyChronExtras(MyChronSource src, ConversionOptions opt, double imuHz,
                                                       TiltPlan tilt, out List<ImuSample> imu)
     {
-        DateTime? startUtc = SessionStartUtc(src.Gps, opt);
+        DateTime? startUtc = TrackBuilder.SessionStartUtc(src.Gps, opt);
         imu = src.LoadImu();
         tilt.ApplyTo(imu, Console.WriteLine);   // level before any downsample, so every output agrees
         if (imuHz > 0) imu = ImuCsvWriter.Downsample(imu, imuHz);
@@ -447,29 +457,16 @@ internal static class Cli
             Racer = src.Info?.Racer ?? "",
             Vehicle = src.Info?.Vehicle ?? "",
             Championship = src.Info?.Championship ?? "",
-            StartLocal = SessionStartUtc(src.Gps, opt) is DateTime utc
+            StartLocal = TrackBuilder.SessionStartUtc(src.Gps, opt) is DateTime utc
                 ? TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), TimeZoneInfo.Local)
                 : src.Info?.StartLocal,
         };
 
         string path = basePath + "_TelemetryOverlay.csv";
-        Console.WriteLine($"  Telemetry Overlay CSV, {channels.Count} channel(s) found:");
+        Console.WriteLine(channels.Count > 0 ? $"  Telemetry Overlay CSV, {channels.Count} channel(s) found:"
+                                             : "  Telemetry Overlay CSV, GPS only:");
         TelemetryOverlayCsv.Write(path, src.Gps, imu, channels, laps, toOpt, Console.WriteLine);
         Console.WriteLine($"Wrote {path}");
-    }
-
-    private static DateTime? SessionStartUtc(GpsSession s, ConversionOptions opt)
-    {
-        // An xrk carries the GPS week, which fixes the instant without any calendar hint.
-        int? week = opt.DateOverrideUtc is null ? s.GpsWeek : null;
-        DateTime? dateHint = opt.DateOverrideUtc ?? s.DateHint;
-        if (week is null && dateHint is null) return null;
-        foreach (var g in s.Samples)
-            if (!double.IsNaN(g.ItowMs) && g.ItowMs > 0)
-                return (week is int w ? ItowTime.FromWeek(w, g.ItowMs, opt.LeapSeconds)
-                                      : ItowTime.ToUtc(g.ItowMs, dateHint!.Value, opt.LeapSeconds))
-                       .AddSeconds(-g.TimeRel);
-        return null;
     }
 
     private static int RunInsta360(List<Insta360Clip> clips, string? output, string? outDir, Outputs formats,
@@ -585,20 +582,16 @@ internal static class Cli
         Console.WriteLine($"Wrote {csv}  ({imu.Count} IMU samples)");
     }
 
-    /// <summary>Downsample on absolute time, needed once clips are concatenated onto one timeline.</summary>
-    private static List<ImuSample> DownsampleByUtc(List<ImuSample> imu, double hz)
+    /// <summary>
+    /// Downsample on absolute time, needed once clips are concatenated onto one timeline. Samples with
+    /// no UTC cannot be placed on it and are left out. The list must be sorted by UTC.
+    /// </summary>
+    internal static List<ImuSample> DownsampleByUtc(IReadOnlyList<ImuSample> imu, double hz)
     {
-        var outp = new List<ImuSample>();
-        double min = 1.0 / hz;
-        DateTime? last = null;
-        foreach (var s in imu)
-        {
-            if (s.Utc is not DateTime u) continue;
-            if (last is DateTime l && (u - l).TotalSeconds < min - 1e-9) continue;
-            last = u;
-            outp.Add(s);
-        }
-        return outp;
+        var timed = imu.Where(s => s.Utc is not null).ToList();
+        if (timed.Count == 0) return timed;
+        DateTime t0 = timed[0].Utc!.Value;
+        return Thinning.ToRate(timed, s => (s.Utc!.Value - t0).TotalSeconds, hz);
     }
 
     /// <summary>Show the gap between consecutive clips, which reveals a split recording versus separate runs.</summary>
@@ -616,8 +609,8 @@ internal static class Cli
     private static void ReportBuild(ConversionOptions opt)
     {
         Console.WriteLine($"  {opt.TotalPoints} points from {opt.SessionCount} session(s).");
-        Console.WriteLine($"  Time base: {(opt.UsedItow ? "iTOW (exact GPS time)" : "relative (no iTOW, sync will need a nudge)")}");
-        Console.WriteLine($"  Output rate: {(opt.TargetHz > 0 ? $"{opt.EffectiveHz:0.#} Hz (downsampled)" : $"{opt.EffectiveHz:0.#} Hz (native)")}");
+        Console.WriteLine($"  Time base: {opt.DescribeTimeBase()}");
+        Console.WriteLine($"  Output rate: {opt.EffectiveHz:0.#} Hz {(opt.Downsampled ? "(downsampled)" : "(native)")}");
         if (opt.StartUtc is DateTime a0 && opt.EndUtc is DateTime a1)
             Console.WriteLine($"  UTC span: {a0:yyyy-MM-dd HH:mm:ss}Z .. {a1:HH:mm:ss}Z");
     }
@@ -635,8 +628,8 @@ internal static class Cli
 
     private static IEnumerable<(string path, bool isFit)> FormatPaths(string basePath, Outputs formats)
     {
-        if (formats.HasFlag(Outputs.Gpx)) yield return (Ext(basePath, ".gpx"), false);
-        if (formats.HasFlag(Outputs.Fit)) yield return (Ext(basePath, ".fit"), true);
+        if (formats.HasFlag(Outputs.Gpx)) yield return (basePath + ".gpx", false);
+        if (formats.HasFlag(Outputs.Fit)) yield return (basePath + ".fit", true);
     }
 
     private static string DirName(string path) =>
@@ -646,7 +639,14 @@ internal static class Cli
     internal static string MergedBaseName(ConversionOptions opt) =>
         "merged-" + (opt.StartUtc is DateTime st ? st.ToString("yyyyMMdd-HHmmss") : "unknown");
 
-    private static string Ext(string p, string ext) => Path.HasExtension(p) ? Path.ChangeExtension(p, ext) : p + ext;
+    /// <summary>
+    /// The base path "-o" names: a .gpx or .fit on it is dropped once, as each output adds its own
+    /// extension. Generated names are only ever appended to, because a session name such as
+    /// "..._a_0242.xrz_SN35004726" has dots of its own, and treating the last part as an extension cut
+    /// the output name short.
+    /// </summary>
+    internal static string OutputBase(string p) =>
+        Path.GetExtension(p).ToLowerInvariant() is ".gpx" or ".fit" ? Path.ChangeExtension(p, null) : p;
 
     /// <summary>
     /// Accept both "12.5" and "12,5": the log prints dots, but a German keyboard types commas. Float
@@ -663,13 +663,16 @@ internal static class Cli
     private static void PrintHelp()
     {
         Console.WriteLine(
-$@"MyChron2Insta360 {AppInfo.Version} - convert RaceStudio3 GPS CSV exports to GPX/FIT for the Insta360 Stats Dashboard.
+$@"MyChron2Insta360 {AppInfo.Version} - convert lap timer and camera telemetry to GPX/FIT for the Insta360 Stats Dashboard.
 
 Inputs (auto-detected):
   * A MyChron '.xrk' or '.xrz' logger file, read directly, no CSV export needed and nothing to
     install. Use --verify-xrk to check that reader against AiM's own library and the CSV export.
   * RaceStudio '..._CSV' folder(s), a PARENT folder holding several, or a _GPS_o.csv / _GPS.csv.
     Each session becomes its own output file; --merge combines them onto one timeline via GPS 'itow'.
+  * A '.vbo' file (Racelogic VBOX format) as the Dragy Lap app exports it, or a folder of them:
+    GPS position, speed, heading and height, already in UTC. No IMU and no laps. A Dragy '.dlap'
+    cannot be read; export the session as .vbo instead.
   * An Insta360 video (.insv / .lrv) recorded with a GPS remote or the phone app connected.
 
 What each output holds:
@@ -677,7 +680,8 @@ What each output holds:
   FIT  GPS track PLUS accelerometer and gyroscope, temperature and lap splits (where available).
   CSV  Accelerometer (g) and gyroscope (deg/s) only, one row per sample, for analysis in other apps.
   TO   One wide CSV for Telemetry Overlay (goprotelemetryextractor.com): GPS, IMU, laps and every
-       other channel the logger recorded, merged onto one time base.
+       other channel the logger recorded, merged onto one time base. From a .vbo: its GPS, heading
+       and satellite count.
 
 Usage:
   MyChron2Insta360 <folder> [more folders...] [options]   CLI mode (any option triggers CLI)
@@ -686,7 +690,8 @@ Usage:
 
 Options:
   --merge                   Merge all sessions into ONE output (default: one file per session).
-  -o, --out <file>          Explicit output path (single-output only; extension set per format).
+  -o, --out <file>          Explicit output path (single-output only). A .gpx or .fit on it is dropped
+                            and each output adds its own: run.gpx, run.fit, run_imu.csv.
   --out-dir <folder>        Write outputs into this folder (created if needed).
   --format <list>           Output format(s), comma separated: gpx, fit, both, telemetry-overlay.
                             Default gpx. (--fit / --both are shortcuts.)
@@ -701,8 +706,10 @@ Options:
   --hz <n>                  Downsample to n Hz. Default: keep the native rate.
   --nudge <seconds>         Add seconds to every timestamp (fine sync tuning).
   --max-accuracy <m>        Drop fixes with reported accuracy worse than m metres (default: keep all).
-  --date <YYYY-MM-DD>       Override the session date (only if it isn't in the folder path).
-  --leap <n>                GPS-UTC leap seconds for iTOW (default {ItowTime.DefaultLeapSeconds}).
+                            A .vbo reports no accuracy, so all of its fixes are kept.
+  --date <YYYY-MM-DD>       Override the session date (only if it isn't in the folder path). For a
+                            .vbo, the UTC date of its first fix, used when its header gives none.
+  --leap <n>                GPS-UTC leap seconds for iTOW (default {ItowTime.DefaultLeapSeconds}). A .vbo is UTC already.
   --trim                    Trim leading/trailing standstill per session (off by default).
   --no-imu-csv              Do not write the separate accel/gyro CSV (it is written by default).
   --imu-hz <n>              Downsample the IMU to n Hz (default: native, ~1000 Hz on Insta360).
@@ -711,7 +718,7 @@ Options:
                             data; give a number to use a known angle instead.
   --detect-tilt             Only measure and print the mount tilt, then exit. Writes nothing.
 
- Telemetry Overlay CSV (--format telemetry-overlay), MyChron sessions only:
+ Telemetry Overlay CSV (--format telemetry-overlay), for MyChron and .vbo sessions:
   --to-rate <hz>            Output grid rate (default 50, the native accel/gyro rate).
   --no-to-invert-steering   Keep the logged steering sign (default: negated, which is what
                             Telemetry Overlay's steering gauge expects).

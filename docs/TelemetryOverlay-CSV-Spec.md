@@ -68,6 +68,15 @@ local = utc0 + t          (Europe/Berlin = UTC+2 in summer)
 Cross-check the far end of the session against the last `_imu.csv` row before trusting it.
 In the reference session this agreed to 12 ms across 57 minutes. **VERIFIED**
 
+### A `.vbo` as input
+
+A Dragy (or other Racelogic VBOX) `.vbo` log goes through the same writer with GPS alone: no IMU, no
+channel files, no laps. Its `time` column is the UTC time of day, and seconds from the first fix are
+the time base, as for a MyChron session. It adds two streams a MyChron does not record, the course
+over ground and the satellite count, which get the `GPS Heading` and `satellites` columns of §4. A
+MyChron session has neither column. In both cases, rows without a position fix (0, 0) stay out of the
+GPS columns, as they stay out of the GPX and FIT.
+
 ---
 
 ## 2. Telemetry Overlay accepts two formats
@@ -155,6 +164,8 @@ Recommended column set, all **VERIFIED** present in the table:
 | `GPS Latitude` | `deg` | `GPS Latitude (deg)` | |
 | `GPS Longitude` | `deg` | `GPS Longitude (deg)` | |
 | `GPS Altitude` | `m` | `GPS Altitude (ALTITUDEUNITS)` | prefer `m` |
+| `GPS Heading` | `deg` | `GPS Heading (deg)` | `.vbo` only; resampled the short way round 0/360 |
+| `satellites` | `sats` | `satellites (sats)` | `.vbo` only |
 | `InlineAcc` | `g` | `InlineAcc (g)` | AiM's name for **longitudinal** |
 | `LateralAcc` | `g` | `LateralAcc (g)` | |
 | `VerticalAcc` | `g` | `VerticalAcc (g)` | |

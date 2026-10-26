@@ -22,7 +22,8 @@ public sealed class TelemetryOverlayOptions
 
 /// <summary>
 /// Writes one wide CSV in AiM "RS2Analysis" style for Telemetry Overlay
-/// (goprotelemetryextractor.com), merging a RaceStudio per-channel export into a single file.
+/// (goprotelemetryextractor.com), merging a session's streams into a single file: everything a MyChron
+/// logged, or the GPS of a .vbo.
 ///
 /// Every column is named so that "header (units)" hits Telemetry Overlay's built-in alias table, which
 /// is what binds a column to a gauge. No remapheaders.txt is written: re-declaring names the app
@@ -67,12 +68,24 @@ public static class TelemetryOverlayCsv
 
         if (gps is { Samples.Count: > 0 })
         {
-            var t = gps.Samples.Select(s => s.TimeRel).ToList();
-            cols.Add(new("GPS Speed", "km/h", "0.0000", Resample(t, gps.Samples.Select(s => s.SpeedMs * MsToKmh).ToList(), grid)));
-            cols.Add(new("GPS Latitude", "deg", "0.00000000", Resample(t, gps.Samples.Select(s => s.Lat).ToList(), grid)));
-            cols.Add(new("GPS Longitude", "deg", "0.00000000", Resample(t, gps.Samples.Select(s => s.Lon).ToList(), grid)));
-            cols.Add(new("GPS Altitude", "m", "0.0000", Resample(t, gps.Samples.Select(s => s.Alt).ToList(), grid)));
-            foreach (var c in cols.Skip(1)) used.Add(c.Header);
+            // Each stream skips the fixes that lack it, and one the source never recorded gets no column:
+            // heading and satellites come from a .vbo, not from a MyChron. Rows without a position are
+            // left out as the GPX and FIT leave them out, or a gauge would dip to 0,0 between real fixes.
+            void Add(string header, string units, string format, Func<GpsSample, double> value, bool angle = false)
+            {
+                var have = gps.Samples.Where(s => TrackBuilder.HasFix(s) && !double.IsNaN(value(s))).ToList();
+                if (have.Count == 0) return;
+                var t = have.Select(s => s.TimeRel).ToList();
+                var v = have.Select(value).ToList();
+                cols.Add(new(header, units, format, angle ? ResampleAngle(t, v, grid) : Resample(t, v, grid)));
+                used.Add(header);
+            }
+            Add("GPS Speed", "km/h", "0.0000", s => s.SpeedMs * MsToKmh);
+            Add("GPS Latitude", "deg", "0.00000000", s => s.Lat);
+            Add("GPS Longitude", "deg", "0.00000000", s => s.Lon);
+            Add("GPS Altitude", "m", "0.0000", s => s.Alt);
+            Add("GPS Heading", "deg", "0.00", s => s.HeadingDeg, angle: true);
+            Add("satellites", "sats", "0", s => s.Satellites);
         }
 
         if (imu is { Count: > 0 })
@@ -174,6 +187,24 @@ public static class TelemetryOverlayCsv
             double f = t1 > t0 ? (x - t0) / (t1 - t0) : 0.0;
             outp[i] = v[j] + f * (v[j + 1] - v[j]);
         }
+        return outp;
+    }
+
+    /// <summary>
+    /// <see cref="Resample"/> for a compass angle: unwrapped first, so 359° to 1° passes through 0°
+    /// rather than through 180°, and wrapped back into 0..360 afterwards.
+    /// </summary>
+    private static double[] ResampleAngle(IReadOnlyList<double> t, IReadOnlyList<double> deg, double[] grid)
+    {
+        var unwrapped = new double[deg.Count];
+        for (int i = 0; i < deg.Count; i++)
+        {
+            if (i == 0) { unwrapped[0] = deg[0]; continue; }
+            double d = deg[i] - deg[i - 1];
+            unwrapped[i] = unwrapped[i - 1] + d - 360 * Math.Round(d / 360);   // the short way round
+        }
+        var outp = Resample(t, unwrapped, grid);
+        for (int i = 0; i < outp.Length; i++) outp[i] = (outp[i] % 360 + 360) % 360;
         return outp;
     }
 

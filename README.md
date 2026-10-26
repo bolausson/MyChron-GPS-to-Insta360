@@ -15,6 +15,9 @@ nothing extra to install: the logger format is read by the tool itself.
 It also works the other way round: point it at an **Insta360 video** (`.insv` / `.lrv`) and it extracts
 the **GPS and IMU** recorded by the camera into GPX, FIT and CSV for use in other apps.
 
+A **Dragy** GPS log works too: the **`.vbo`** the Dragy Lap app exports converts into the same GPX, FIT
+and Telemetry Overlay outputs.
+
 A single Windows `.exe`, with no runtime to install. **Drag the session onto it**, or **double-click**
 to pick it, or drive it from the **command line**.
 
@@ -108,6 +111,38 @@ The X-series cameras have no built-in GPS, so a clip only contains GPS if a **GP
 the Insta360 app is only a dashboard overlay and does not write GPS into the file. Telemetry may sit in
 the `.insv` or in the matching `.lrv`, so if one comes up empty, try the other.
 
+## Reading a Dragy .vbo
+
+The **Dragy Lap** app exports a session as a **`.vbo`**, Racelogic's open VBOX text format, which other
+loggers and lap timers write too. Drop one in, or a folder holding several, and it converts like a
+MyChron session: GPX, FIT and the Telemetry Overlay CSV, with the same time nudge, rate, trim and merge
+options. It can sit in the list next to MyChron sessions.
+
+Only the GPS columns of a `.vbo` are read: position, speed, heading, height and the satellite count,
+at 25 Hz from a Dragy. A Dragy has no accelerometer, so there is no IMU CSV for a `.vbo` (the log says
+so), and no laps.
+
+- **Time.** The file states UTC itself, so no GPS week or leap seconds come into it. Each row carries the
+  time of day only. The date comes from the header (Dragy's "UTC Date Started", else "File created
+  on"), else from `--date` on the command line, else from a date in the file name, and the log says
+  which. A file that gives no date at all is refused rather than guessed: convert it on its own on the
+  command line with `--date YYYY-MM-DD`. A session that runs past midnight UTC carries on into the next
+  day, and a stray row whose time is out of step with its neighbours is dropped and counted in the log.
+- **Several at once.** In a folder or a list of several sessions, a `.vbo` that cannot be read (no date,
+  no fixes) is skipped with a note in the log and the rest still convert.
+- **Telemetry Overlay.** The CSV carries speed, position and altitude as for a MyChron, plus the heading
+  and the satellite count, which bind to Telemetry Overlay's gauges.
+- **Height.** A Dragy reports height above sea level, a MyChron height above the GPS ellipsoid. At the
+  Erzgebirgsring that is 44 m apart (it varies by place), so a Dragy and a MyChron track of the same
+  circuit do not share altitudes.
+- **25 Hz.** In most seconds a Dragy delivers 24 fixes and fills the 25th in by interpolation, so speed
+  worked out from positions alone wobbles once a second. If a gauge that does that looks jittery,
+  convert at a fixed 5 Hz.
+
+**A `.dlap` cannot be read.** It is the Dragy app's own package, undocumented, with its data part
+encrypted. Export the session as `.vbo` in the Dragy Lap app instead; the tool says so if you drop a
+`.dlap` in.
+
 ## What each output holds
 
 | Output | Contents |
@@ -115,7 +150,7 @@ the `.insv` or in the matching `.lrv`, so if one comes up empty, try the other.
 | **GPX** | GPS track only: position, altitude, per-point speed and time. Best for maps and Insta360. |
 | **FIT** | GPS track plus accelerometer and gyroscope, temperature and lap splits (where the source has them). |
 | **IMU CSV** | Accelerometer (g) and gyroscope (deg/s), one row per sample. Same columns for both sources. |
-| **Telemetry Overlay** | One wide CSV holding every channel the logger recorded, for goprotelemetryextractor.com. MyChron sessions only. |
+| **Telemetry Overlay** | One wide CSV holding every channel the logger recorded, for goprotelemetryextractor.com. MyChron sessions, and the GPS of a `.vbo`. |
 
 The IMU CSV is written by default; untick **IMU CSV** in the GUI or pass `--no-imu-csv` to skip it. Its
 columns are `utc, elapsed_s, accel_x_g, accel_y_g, accel_z_g, gyro_x_dps, gyro_y_dps, gyro_z_dps`. Note
@@ -160,8 +195,8 @@ an invert box: steering is negated by default because the gauge renders it mirro
 left in the "seat of the pants" sense. `--no-to-invert-steering` and `--to-invert-lateral` swap either.
 `--to-rate` sets the output grid, 50 Hz by default, matching the native accel and gyro rate.
 
-This export reads a RaceStudio session folder, so it does not apply to Insta360 video input.
-`docs/TelemetryOverlay-CSV-Spec.md` documents the file format in full.
+A `.vbo` gets this export too, with its GPS, heading and satellite count. It does not apply to Insta360
+video input. `docs/TelemetryOverlay-CSV-Spec.md` documents the file format in full.
 
 ## Remembering your settings
 
@@ -254,19 +289,23 @@ Because every point has exact GPS time, they line up on one timeline automatical
 
 - **Default:** each session becomes its own output file.
 - **Merge** (CLI `--merge` / GUI "Merge sessions into one file"): all sessions combined into a single
-  output, with one GPX track segment per session so no line is drawn across the stopped gaps.
+  output, with one GPX track segment per session so no line is drawn across the stopped gaps. Sessions
+  that overlap in time, such as a MyChron and a Dragy log of the same run, are two recordings of the
+  same stretch, which one merged file would show twice: the log warns, and they are better converted
+  without merging.
 
 Output names: an individual file takes its session folder's name. A merged file is
 **`merged-YYYYMMDD-HHMMSS`** built from the earliest GPS timestamp (UTC). Override with `--out`, or
-place the files elsewhere with `--out-dir`.
+place the files elsewhere with `--out-dir`. A `.gpx` or `.fit` on the `--out` name is dropped and each
+output adds its own, so `-o run.gpx` writes `run.gpx`, `run.fit` and `run_imu.csv`.
 
 ## Features
 
 - Reads a MyChron **`.xrk` / `.xrz`** directly, with no external library and no CSV export step, or a
-  RaceStudio `_CSV` folder, a **parent folder of several**, a `_GPS*.csv`, or an **Insta360
-  `.insv` / `.lrv`** video, all auto-detected.
-- **Exact UTC** from GPS `itow` (MyChron) or from the camera's GPS records (Insta360), so no timezone
-  configuration.
+  RaceStudio `_CSV` folder, a **parent folder of several**, a `_GPS*.csv`, a **Dragy `.vbo`** GPS log,
+  or an **Insta360 `.insv` / `.lrv`** video, all auto-detected.
+- **Exact UTC** from GPS `itow` (MyChron), from the camera's GPS records (Insta360) or as a `.vbo`
+  states it, so no timezone configuration.
 - Keeps the **native rates** (GPS 25 Hz, IMU 50 Hz on MyChron, about 1000 Hz on Insta360), each with an
   optional downsample.
 - Extracts **accelerometer and gyroscope**, plus **temperature** and **lap splits** from MyChron.
@@ -317,13 +356,15 @@ MyChron2Insta360 "...\Session_..._CSV" --both --tilt                # level the 
 MyChron2Insta360 "...\Session_..._CSV" --both --tilt 13             # level it by a known 13 degrees
 MyChron2Insta360 "...\Session_..._CSV" --format telemetry-overlay --tilt   # one wide CSV for Telemetry Overlay
 MyChron2Insta360 "...\Session_..._CSV" --format gpx,fit,telemetry-overlay  # all three at once
+MyChron2Insta360 "...\dragylap_20261024_164151_Track.vbo" --format gpx,fit,telemetry-overlay  # a Dragy log
+MyChron2Insta360 "...\plain.vbo" --date 2026-10-24                  # a .vbo whose header gives no date
 MyChron2Insta360 --help
 ```
 
 | Option | Meaning |
 |---|---|
 | `--merge` | Merge all sessions into ONE output (default: one file per session) |
-| `-o, --out <file>` | Explicit output path, single output only (extension set per format) |
+| `-o, --out <file>` | Explicit output path, single output only. A `.gpx` or `.fit` on it is dropped and each output adds its own: `run.gpx`, `run.fit`, `run_imu.csv` |
 | `--out-dir <folder>` | Write outputs into this folder (created if needed) |
 | `--format <list>` | Output format(s), comma separated: `gpx`, `fit`, `both`, `telemetry-overlay`. Default `gpx` |
 | `--to-rate <hz>` | Telemetry Overlay grid rate (default 50) |
@@ -337,9 +378,9 @@ MyChron2Insta360 --help
 | `--xrk-dll <folder>` | Where AiM's library sits, used only by `--verify-xrk` |
 | `--hz <n>` | Downsample to n Hz (default: native rate) |
 | `--nudge <seconds>` | Shift every timestamp to fine-tune sync |
-| `--max-accuracy <m>` | Drop fixes with reported accuracy worse than m metres (default: keep all) |
-| `--date <YYYY-MM-DD>` | Override the session date (only if it isn't in the folder path) |
-| `--leap <n>` | GPS-UTC leap seconds for iTOW (default 18) |
+| `--max-accuracy <m>` | Drop fixes with reported accuracy worse than m metres (default: keep all). A `.vbo` reports none, so all its fixes are kept |
+| `--date <YYYY-MM-DD>` | Override the session date (only if it isn't in the folder path). For a `.vbo`, the UTC date of its first fix, used when its header gives none |
+| `--leap <n>` | GPS-UTC leap seconds for iTOW (default 18). Not used for a `.vbo`, which is UTC already |
 | `--trim` | Trim leading/trailing standstill per session (off by default) |
 | `--no-imu-csv` | Do not write the separate accel/gyro CSV (it is written by default) |
 | `--imu-hz <n>` | Downsample the IMU to n Hz (default: native, about 1000 Hz on Insta360) |
@@ -360,6 +401,7 @@ src/
                            RaceStudioGpsCsv / RaceStudioImu / RaceStudioChannels (MyChron readers),
                            RaceStudioChannelScan (discovers whatever channels a session has),
                            Insta360Trailer (native .insv/.lrv metadata reader),
+                           VboReader (Dragy and other .vbo GPS logs),
                            ItowTime (GPS to UTC), Conversion (build/downsample),
                            TiltCorrection (mount tilt), Imu (shared sample type),
                            GpxWriter, FitWriter, ImuCsvWriter,
@@ -371,13 +413,44 @@ docs/                      TelemetryOverlay-CSV-Spec.md and the extracted channe
 
 Run the tests with `dotnet test tests/MyChron2Insta360.Tests`.
 
-Notes: the original XRK file is a proprietary AiM binary, so this tool uses the documented CSV export
-instead of a native XRK reader. The Insta360 trailer reader is a clean-room implementation of the
+Notes: the .xrk / .xrz reader is this tool's own, with its format knowledge taken from libxrk, an
+MIT-licensed implementation (see THIRD-PARTY-NOTICES.md). The Insta360 trailer reader is a clean-room implementation of the
 publicly documented format, with no external tool required; the layout was cross-checked against
 [telemetry-parser](https://github.com/AdrianEddy/telemetry-parser) and [ExifTool](https://exiftool.org/),
 and the output verified against ExifTool on real files.
 
 ## Changes
+
+### 1.4.0
+
+- **Reads Dragy `.vbo` files.** The Dragy Lap app's export, Racelogic's VBOX text format, converts like
+  a MyChron session into GPX, FIT and the Telemetry Overlay CSV, which also carries the Dragy's heading
+  and satellite count. The time is UTC as the file states it; the date comes from its header, else
+  `--date`, else its file name. Only its GPS is read, so there is no IMU CSV for it. Drop a single file
+  or a folder of them, next to MyChron sessions if you like; one that cannot be read is skipped with a
+  note.
+- A Dragy **`.dlap`** cannot be read, being the app's own encrypted format. Dropping one now says to
+  export the session as `.vbo` instead.
+- Fixed: the command line cut output names at the last dot, so a session called
+  `..._a_0242.xrz_SN35004726` was written as `..._a_0242.gpx`. Names are now kept whole, and
+  `-o run.gpx` still writes `run.gpx` and `run.fit`.
+- Fixed: a fixed rate came out low whenever the native rate was not a multiple of it, 8.3 Hz when 10 Hz
+  was asked of 25 Hz GPS. GPS and IMU downsampling now deliver the rate asked for, and the log reports
+  the rate actually written.
+- Fixed: merging sessions in the GUI left the merged IMU without timestamps, so the FIT placed every
+  session's IMU from the first session's start and the IMU CSV's UTC column stayed empty. Each
+  session's Telemetry Overlay CSV also took the first session's start time.
+- Fixed: the GUI timed IMU, laps and temperature from the first GPS fix rather than from the start of
+  the session, a fraction of a second late, and late by the whole trimmed stretch with Trim ticked.
+- Fixed: a merged FIT written by the command line carried no IMU at all.
+- Fixed: in a merged FIT, IMU samples just after the gap between two sessions or clips could share a
+  message with those before it, which put them no more than 65 s after the gap's start instead of at
+  their own time.
+- Fixed: the Telemetry Overlay CSV's GPS columns took in rows without a position fix, so a gauge could
+  dip towards 0, 0 between real fixes.
+- Merging sessions that overlap in time now warns that the merged file shows that stretch twice.
+- The time nudge now moves the IMU, laps and temperature with the track on the command line too, as it
+  already did in the GUI.
 
 ### 1.3.3
 
