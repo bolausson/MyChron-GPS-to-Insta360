@@ -21,6 +21,11 @@ public sealed class GpsSession
     public List<GpsSample> Samples { get; } = new();
     public string Name { get; set; } = "Session";
     public DateTime? DateHint { get; set; }   // rough date (UTC) used only to pick the GPS week for iTOW
+    /// <summary>
+    /// The date hint is when the export was written, not the day of the session: it comes after the
+    /// session, days after at times, so it bounds the session rather than dates it.
+    /// </summary>
+    public bool DateHintIsFileTime { get; set; }
     public int? GpsWeek { get; set; }         // exact GPS week when the source supplies it (xrk does)
     /// <summary>
     /// UTC at TimeRel 0, for a source that states UTC itself (a .vbo) rather than GPS time. It wins over
@@ -102,7 +107,7 @@ public static class RaceStudioGpsCsv
         foreach (var f in files)
         {
             var s = Parse(f);
-            s.DateHint = ExtractDateHint(f);
+            SetDateHint(s, f);
             s.Name = ExtractName(f);
             sessions.Add(s);
         }
@@ -156,12 +161,24 @@ public static class RaceStudioGpsCsv
     }
 
     /// <summary>RaceStudio exports under ...\data\YYYY-MM-DD\Racer\Track\...; pull that date, else the file's write time.</summary>
-    internal static DateTime? ExtractDateHint(string gpsFile)
+    internal static DateTime? ExtractDateHint(string gpsFile, out bool fileTime)
     {
-        foreach (var part in gpsFile.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+        fileTime = false;
+        // The full path: run inside a dated folder with a relative path, the date part is not in the
+        // path as typed, and the session was dated by its write time instead.
+        string full;
+        try { full = Path.GetFullPath(gpsFile); } catch { full = gpsFile; }
+        foreach (var part in full.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
             if (DateTime.TryParseExact(part, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var d))
                 return DateTime.SpecifyKind(d, DateTimeKind.Utc);
-        try { return File.GetLastWriteTimeUtc(gpsFile); } catch { return null; }
+        try { fileTime = true; return File.GetLastWriteTimeUtc(gpsFile); } catch { fileTime = false; return null; }
+    }
+
+    /// <summary>Date a session read from <paramref name="gpsFile"/>, and say how it was dated.</summary>
+    internal static void SetDateHint(GpsSession session, string gpsFile)
+    {
+        session.DateHint = ExtractDateHint(gpsFile, out bool fileTime);
+        session.DateHintIsFileTime = fileTime;
     }
 
     internal static string ExtractName(string gpsFile)

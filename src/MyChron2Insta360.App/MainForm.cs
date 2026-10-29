@@ -18,17 +18,17 @@ public sealed class MainForm : Form
     private readonly ListBox _inputs = new() { SelectionMode = SelectionMode.MultiExtended, HorizontalScrollbar = true, IntegralHeight = false };
     private readonly Label _resolved = new() { AutoSize = false, ForeColor = Color.DimGray };
     private readonly TextBox _outDir = new() { PlaceholderText = "(same folder as input)" };
-    private readonly NumericUpDown _nudge = new() { Minimum = -600, Maximum = 600, DecimalPlaces = 1, Increment = 0.5m };
+    private readonly NumberUpDown _nudge = new() { Minimum = -600, Maximum = 600, DecimalPlaces = 3, Increment = 0.5m };
     private readonly CheckBox _native = new() { Text = "Native rate (as recorded)", Checked = true };
-    private readonly NumericUpDown _hz = new() { Minimum = 1, Maximum = 100, Value = 25 };
-    private readonly NumericUpDown _maxAcc = new() { Minimum = 0, Maximum = 100, DecimalPlaces = 1, Increment = 0.5m, Value = 0 };
+    private readonly NumberUpDown _hz = new() { Minimum = 1, Maximum = 100, Value = 25 };
+    private readonly NumberUpDown _maxAcc = new() { Minimum = 0, Maximum = 100, DecimalPlaces = 1, Increment = 0.5m, Value = 0 };
     private readonly CheckBox _gpx = new() { Text = "GPX", Checked = true };
     private readonly CheckBox _fit = new() { Text = "FIT", Checked = true };
     private readonly CheckBox _imuCsv = new() { Text = "IMU CSV", Checked = true };
     private readonly CheckBox _toCsv = new() { Text = "Telemetry Overlay", Checked = true };
     private readonly TextBox _iniPath = new() { PlaceholderText = "(MyChron2Insta360.ini, beside the exe)" };
     private readonly Label _formatHelp = new() { AutoSize = false, ForeColor = Color.DimGray };
-    private readonly NumericUpDown _imuHz = new() { Minimum = 0, Maximum = 1000, Increment = 10, Value = 0 };
+    private readonly NumberUpDown _imuHz = new() { Minimum = 0, Maximum = 1000, Increment = 10, Value = 0 };
     private readonly CheckBox _tilt = new() { Text = "Correct mount tilt", Checked = false };
     private readonly TextBox _tiltDeg = new() { PlaceholderText = "auto", TextAlign = HorizontalAlignment.Right };
     private readonly Button _tiltDetect = new() { Text = "Autodetect" };
@@ -217,6 +217,7 @@ public sealed class MainForm : Form
             if (!string.Equals(iniUsed, AppSettings.DefaultPath, StringComparison.OrdinalIgnoreCase))
                 _iniPath.Text = iniUsed;
             Log($"Loaded your saved settings from {iniUsed}");
+            foreach (var p in saved.Problems) Log($"  Warning: {p}");
         }
 
         if (preload is { Length: > 0 }) AddInputs(preload);
@@ -424,7 +425,9 @@ public sealed class MainForm : Form
             Hz = (double)_hz.Value,
             MaxAccuracy = (double)_maxAcc.Value,
             ImuHz = (double)_imuHz.Value,
-            Tilt = !_tilt.Checked ? "off" : typedTilt.Length == 0 ? "auto" : typedTilt,
+            // An angle typed as 13,5 is saved as 13.5, which the command line reads whatever Windows' format.
+            Tilt = !_tilt.Checked ? "off" : typedTilt.Length == 0 ? "auto"
+                 : Cli.ParseD(typedTilt) is double deg ? deg.ToString("0.###", CultureInfo.InvariantCulture) : typedTilt,
             Merge = _merge.Checked,
             Trim = _trim.Checked,
             SourcesDir = AppSettings.SourcesDirOrDefault(_sourcesDir.Text),
@@ -441,11 +444,11 @@ public sealed class MainForm : Form
         _toCsv.Checked = f.Contains("telemetry-overlay") || f.Contains("telemetryoverlay") || f.Contains("to");
         _imuCsv.Checked = s.ImuCsv;
         _outDir.Text = s.OutDir;
-        _nudge.Value = Clamp(_nudge, s.Nudge);
+        _nudge.SetValue(s.Nudge);
         _native.Checked = s.NativeRate;
-        _hz.Value = Clamp(_hz, s.Hz);
-        _maxAcc.Value = Clamp(_maxAcc, s.MaxAccuracy);
-        _imuHz.Value = Clamp(_imuHz, s.ImuHz);
+        _hz.SetValue(s.Hz);
+        _maxAcc.SetValue(s.MaxAccuracy);
+        _imuHz.SetValue(s.ImuHz);
 
         bool off = s.Tilt.Equals("off", StringComparison.OrdinalIgnoreCase) || s.Tilt.Length == 0;
         _tilt.Checked = !off;
@@ -459,11 +462,16 @@ public sealed class MainForm : Form
         UpdateResolved();
     }
 
-    /// <summary>A saved value outside a control's range must not throw on load.</summary>
-    private static decimal Clamp(NumericUpDown c, double v) => Math.Clamp((decimal)v, c.Minimum, c.Maximum);
-
     private void SaveDefaults()
     {
+        // Saved as typed, an angle that is no number came back as a settings file line nothing could read.
+        if (BuildTiltPlan() is null)
+        {
+            MessageBox.Show(this, $"'{_tiltDeg.Text}' is not a valid tilt angle, so nothing was saved.\n\n" +
+                                  "Leave the field empty to measure it from the data.",
+                            Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
         try
         {
             CollectSettings().Save(_iniPath.Text, out string used);
@@ -607,7 +615,7 @@ public sealed class MainForm : Form
                     if (t.Gps.Count > 0)
                     {
                         DateTime g0 = t.Gps[0].Utc;
-                        foreach (var s in t.Imu) s.Utc = g0.AddSeconds(s.ElapsedS);
+                        foreach (var s in t.Imu) s.Utc = g0.PlusSeconds(s.ElapsedS);
                     }
                     slots[i] = (t, used);
                 });
@@ -715,6 +723,7 @@ public sealed class MainForm : Form
             // That export merges a RaceStudio channel folder and uses the MyChron axis frame, so it
             // does not apply to camera telemetry.
             if (toCsv) Log("Note: the Telemetry Overlay CSV is a MyChron export; skipping it for Insta360 input.");
+            if (_nudge.Value != 0) Log(Cli.Insta360NudgeNote((double)_nudge.Value));
             await ConvertInsta360Async(clips, gpx, fit, imuCsv, imuHz, _merge.Checked, tiltPlan);
             return;
         }
@@ -764,7 +773,7 @@ public sealed class MainForm : Form
                         if (imuHz > 0) im = ImuCsvWriter.Downsample(im, imuHz);
                         // Each session on its own clock: unstamped, the FIT and the IMU CSV would place
                         // every session's IMU from the first one's start.
-                        if (startUtc is DateTime su) foreach (var v in im) v.Utc = su.AddSeconds(v.ElapsedS);
+                        if (startUtc is DateTime su) foreach (var v in im) v.Utc = su.PlusSeconds(v.ElapsedS);
                         // The AiM container describes one session, so this export stays per session
                         // even when the GPX and FIT are merged.
                         if (toCsv)
@@ -797,12 +806,12 @@ public sealed class MainForm : Form
                         var imu = src.LoadImu();
                         tiltPlan.ApplyTo(imu, Log);   // level before any downsample, so every output agrees
                         if (imuHz > 0) imu = ImuCsvWriter.Downsample(imu, imuHz);
-                        if (startUtc is DateTime su0) foreach (var v in imu) v.Utc = su0.AddSeconds(v.ElapsedS);
+                        if (startUtc is DateTime su0) foreach (var v in imu) v.Utc = su0.PlusSeconds(v.ElapsedS);
 
                         var laps = new List<LapSplit>();
                         if (startUtc is DateTime lapStart)
                             foreach (var (number, start, duration) in src.LoadLaps())
-                                laps.Add(new LapSplit { Number = number, StartUtc = lapStart.AddSeconds(start), DurationS = duration });
+                                laps.Add(new LapSplit { Number = number, StartUtc = lapStart.PlusSeconds(start), DurationS = duration });
                         var ex = new FitWriter.Extras
                         {
                             Imu = imu.Count > 0 ? imu : null,
@@ -823,6 +832,7 @@ public sealed class MainForm : Form
             Log($"Found {result.count} session(s):");
             foreach (var s in result.sessionLines) Log(s);
             Log($"Time base: {opt.DescribeTimeBase()}");
+            Log($"Time nudge: {opt.DescribeNudge()}");
             Log($"Output rate: {opt.EffectiveHz:0.#} Hz {(opt.Downsampled ? "(downsampled)" : "(native)")}");
             foreach (var o in opt.Overlaps)
                 Log($"Warning: {o}. They are two recordings of the same stretch, which one merged file " +

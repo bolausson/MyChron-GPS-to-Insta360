@@ -43,6 +43,9 @@ internal sealed class AppSettings
     public string SourcesDir = RaceStudioDataDir;
     public bool AlwaysOpenSourcesDir;
 
+    /// <summary>Lines of the file that could not be read, for the log. Each was ignored. Not saved.</summary>
+    public readonly List<string> Problems = new();
+
     /// <summary>
     /// The Sources pickers' default folder: the one typed, or RaceStudio's when the box is empty.
     /// Surrounding quotes are dropped, because Explorer's "Copy as path" adds them.
@@ -67,24 +70,25 @@ internal sealed class AppSettings
     public static bool Exists(string? path) => File.Exists(Resolve(path));
 
     /// <summary>
-    /// Which file to actually read. With no path given this is the default one beside the exe, unless
-    /// that file only holds a "settings-file = ..." line, which points somewhere else. That pointer is
-    /// what lets a settings file live outside a read-only install folder and still be found on the next
-    /// start, without the program needing a registry key or a hidden profile directory.
+    /// Which file to actually read: the one given, or with no path the default one beside the exe. If
+    /// that file only holds a "settings-file = ..." line, it points somewhere else, and that is read
+    /// instead. The pointer is what lets a settings file live outside a read-only install folder and
+    /// still be found on the next start, without the program needing a registry key or a hidden profile
+    /// directory. A pointer named with --ini is followed too; it used to read as an empty settings file.
     /// </summary>
     public static string Resolve(string? path) => Resolve(path, out _);
 
-    /// <param name="viaPointer">True when the answer came from a "settings-file" redirect, which lets
-    /// the caller say so when the file it points at is missing rather than quietly using defaults.</param>
-    public static string Resolve(string? path, out bool viaPointer)
+    /// <param name="pointer">The file holding the "settings-file" redirect when the answer came from one,
+    /// which lets the caller say so when the file it points at is missing rather than quietly using
+    /// defaults.</param>
+    public static string Resolve(string? path, out string? pointer)
     {
-        viaPointer = false;
-        if (!string.IsNullOrWhiteSpace(path)) return path!;
-        string def = DefaultPath;
+        pointer = null;
+        string file = string.IsNullOrWhiteSpace(path) ? DefaultPath : path!;
         try
         {
-            if (!File.Exists(def)) return def;
-            foreach (var raw in File.ReadAllLines(def))
+            if (!File.Exists(file)) return file;
+            foreach (var raw in File.ReadAllLines(file))
             {
                 string line = raw.Trim();
                 if (!line.StartsWith("settings-file", StringComparison.OrdinalIgnoreCase)) continue;
@@ -93,23 +97,24 @@ internal sealed class AppSettings
                 string target = line[(eq + 1)..].Trim();
                 // Returned even when it is missing: a settings file on a network or sync folder that
                 // has not arrived yet must be reported, not silently replaced by the defaults.
-                if (target.Length > 0) { viaPointer = true; return target; }
+                if (target.Length > 0) { pointer = file; return target; }
             }
         }
-        catch (IOException) { /* fall back to the default file */ }
-        return def;
+        // Read the file itself then, and let Load report why it cannot be read.
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        return file;
     }
 
     /// <summary>Read a settings file. A missing file simply yields the built-in defaults.</summary>
     public static AppSettings Load(string? path, out string used, out string? error)
     {
-        used = Resolve(path, out bool viaPointer);
+        used = Resolve(path, out string? pointer);
         error = null;
         var s = new AppSettings();
         if (!File.Exists(used))
         {
-            if (viaPointer)
-                error = $"{DefaultPath} points here, but the file is not there. Using the built-in defaults.";
+            if (pointer is not null)
+                error = $"{pointer} points here, but the file is not there. Using the built-in defaults.";
             return s;
         }
 
@@ -119,31 +124,53 @@ internal sealed class AppSettings
             {
                 string line = raw.Trim();
                 if (line.Length == 0 || line[0] is '#' or ';' or '[') continue;
+                // A line that cannot be read is ignored, and says so: the command line takes the nudge
+                // from here, and a typo used to leave it out without a word.
                 int eq = line.IndexOf('=');
-                if (eq <= 0) continue;
+                if (eq <= 0) { s.Problems.Add($"'{line}' is not a 'key = value' line and was ignored."); continue; }
                 string key = line[..eq].Trim().ToLowerInvariant();
                 string value = line[(eq + 1)..].Trim();
+                double Num(double current)
+                {
+                    if (Cli.ParseD(value) is double d) return d;
+                    s.Problems.Add($"'{key} = {value}' is not a number and was ignored.");
+                    return current;
+                }
+                bool Bool(bool current)
+                {
+                    if (Flag(value) is bool b) return b;
+                    s.Problems.Add($"'{key} = {value}' is not true or false and was ignored.");
+                    return current;
+                }
                 switch (key)
                 {
-                    case "format": s.Format = value; break;
-                    case "imu-csv": s.ImuCsv = Bool(value, s.ImuCsv); break;
-                    case "out-dir": s.OutDir = value; break;
-                    case "nudge": s.Nudge = Num(value, s.Nudge); break;
-                    case "rate":
-                        s.NativeRate = value.Equals("native", StringComparison.OrdinalIgnoreCase);
-                        if (!s.NativeRate) s.Hz = Num(value, s.Hz);
+                    case "format":
+                        // Empty is what the GUI saves with only the IMU CSV ticked.
+                        if (value.Length > 0 && Cli.ParseFormats(value, out _) == Outputs.None)
+                            s.Problems.Add($"'{key} = {value}' is not a list of gpx, fit, telemetry-overlay and was ignored.");
+                        else s.Format = value;
                         break;
-                    case "max-accuracy": s.MaxAccuracy = Num(value, s.MaxAccuracy); break;
-                    case "imu-hz": s.ImuHz = Num(value, s.ImuHz); break;
-                    case "tilt": s.Tilt = value; break;
-                    case "merge": s.Merge = Bool(value, s.Merge); break;
-                    case "trim": s.Trim = Bool(value, s.Trim); break;
-                    case "to-rate": s.ToRate = Num(value, s.ToRate); break;
-                    case "to-invert-steering": s.ToInvertSteering = Bool(value, s.ToInvertSteering); break;
-                    case "to-invert-lateral": s.ToInvertLateral = Bool(value, s.ToInvertLateral); break;
-                    case "prefer-xrk": s.PreferXrk = Bool(value, s.PreferXrk); break;
+                    case "imu-csv": s.ImuCsv = Bool(s.ImuCsv); break;
+                    case "out-dir": s.OutDir = value; break;
+                    case "nudge": s.Nudge = Num(s.Nudge); break;
+                    case "rate":
+                        if (value.Equals("native", StringComparison.OrdinalIgnoreCase)) s.NativeRate = true;
+                        else if (Cli.ParseD(value) is double hz) { s.NativeRate = false; s.Hz = hz; }
+                        else s.Problems.Add($"'{key} = {value}' is not 'native' or a number and was ignored.");
+                        break;
+                    case "max-accuracy": s.MaxAccuracy = Num(s.MaxAccuracy); break;
+                    case "imu-hz": s.ImuHz = Num(s.ImuHz); break;
+                    case "tilt": s.Tilt = ReadTilt(value, s.Problems); break;
+                    case "merge": s.Merge = Bool(s.Merge); break;
+                    case "trim": s.Trim = Bool(s.Trim); break;
+                    case "to-rate": s.ToRate = Num(s.ToRate); break;
+                    case "to-invert-steering": s.ToInvertSteering = Bool(s.ToInvertSteering); break;
+                    case "to-invert-lateral": s.ToInvertLateral = Bool(s.ToInvertLateral); break;
+                    case "prefer-xrk": s.PreferXrk = Bool(s.PreferXrk); break;
                     case "sources-dir": s.SourcesDir = value; break;
-                    case "always-open-sources-dir": s.AlwaysOpenSourcesDir = Bool(value, s.AlwaysOpenSourcesDir); break;
+                    case "always-open-sources-dir": s.AlwaysOpenSourcesDir = Bool(s.AlwaysOpenSourcesDir); break;
+                    case "settings-file": break;   // a pointer, already followed by Resolve
+                    default: s.Problems.Add($"'{key}' is not a setting this program knows and was ignored."); break;
                 }
             }
         }
@@ -201,13 +228,29 @@ internal sealed class AppSettings
 
     private static string Low(bool b) => b ? "true" : "false";
 
-    private static bool Bool(string v, bool fallback) => v.ToLowerInvariant() switch
+    private static bool? Flag(string v) => v.ToLowerInvariant() switch
     {
         "true" or "yes" or "on" or "1" => true,
         "false" or "no" or "off" or "0" => false,
-        _ => fallback,
+        _ => null,
     };
 
-    /// <summary>Accepts a dot or a comma, like every other number this program reads.</summary>
-    private static double Num(string v, double fallback) => Cli.ParseD(v) ?? fallback;
+    /// <summary>
+    /// "off", "auto" or an angle, as the GUI saves it. Empty reads as off, as the GUI always took it; the
+    /// words every other switch here takes read as off or auto; and anything else keeps the correction
+    /// on with the angle measured, since only "off" ever turned it off.
+    /// </summary>
+    private static string ReadTilt(string value, List<string> problems)
+    {
+        if (value.Length == 0) return "off";
+        if (Cli.ParseD(value) is not null || value.Equals("auto", StringComparison.OrdinalIgnoreCase)) return value;
+        if (value.Equals("off", StringComparison.OrdinalIgnoreCase)) return "off";
+        switch (Flag(value))
+        {
+            case true: return "auto";
+            case false: return "off";
+        }
+        problems.Add($"'tilt = {value}' is not off, auto or an angle, so the angle is measured from the data.");
+        return "auto";
+    }
 }

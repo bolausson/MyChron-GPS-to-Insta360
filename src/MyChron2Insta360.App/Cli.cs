@@ -56,7 +56,9 @@ internal static class Cli
             bool useIni = true;
             for (int k = 0; k < args.Length; k++)
             {
-                if (args[k] == "--ini" && k + 1 < args.Length) iniPath = args[k + 1];
+                if (args[k] == "--ini")
+                    iniPath = k + 1 < args.Length && IsValue(args[k + 1]) ? args[k + 1]
+                            : throw new UsageError("--ini needs a value after it.");
                 else if (args[k] == "--no-ini") useIni = false;
             }
             var settings = new AppSettings { Format = "gpx" };   // the command line's own default
@@ -64,8 +66,24 @@ internal static class Cli
             if (useIni)
             {
                 var loaded = AppSettings.Load(iniPath, out iniUsed, out string? iniError);
+                // A file named on the command line has to be there: going on without it converted with
+                // none of its settings, its nudge included, and said nothing.
+                if (iniPath is not null && (iniError is not null || !File.Exists(iniUsed)))
+                {
+                    AppSettings.Resolve(iniPath, out string? pointer);
+                    throw new UsageError(
+                        Directory.Exists(iniUsed) ? $"--ini: '{iniUsed}' is a folder, not a settings file."
+                        : File.Exists(iniUsed) ? $"--ini: '{iniUsed}' cannot be read: {iniError}"
+                        : pointer is not null ? $"--ini: '{pointer}' points to '{iniUsed}', which is not there."
+                        : $"--ini: '{iniUsed}' is not there.");
+                }
                 if (iniError is not null) Console.Error.WriteLine($"Warning: {iniUsed}: {iniError}");
-                else if (File.Exists(iniUsed)) { settings = loaded; Console.WriteLine($"Settings from {iniUsed}"); }
+                else if (File.Exists(iniUsed))
+                {
+                    settings = loaded;
+                    Console.WriteLine($"Settings from {iniUsed}");
+                    foreach (var p in loaded.Problems) Console.Error.WriteLine($"Warning: {iniUsed}: {p}");
+                }
             }
 
             var inputs = new List<string>();
@@ -74,6 +92,7 @@ internal static class Cli
             // A settings file saved with every output unticked would otherwise be an error here.
             string format = settings.Format.Trim().Length > 0 ? settings.Format : "gpx";
             double? nudge = settings.Nudge != 0 ? settings.Nudge : null;
+            bool nudgeFromIni = nudge is not null;
             double? hz = settings.NativeRate ? null : settings.Hz;
             double? maxAcc = settings.MaxAccuracy != 0 ? settings.MaxAccuracy : null;
             int? leap = null;
@@ -93,27 +112,33 @@ internal static class Cli
             for (int i = 0; i < args.Length; i++)
             {
                 string a = args[i];
-                string? Next() => i + 1 < args.Length ? args[++i] : null;
+                // Another option where the value should be means the value is missing: taken as the
+                // value, "--out-dir --merge" wrote into a folder called "--merge" and never merged.
+                string? Next() => i + 1 < args.Length && IsValue(args[i + 1]) ? args[++i] : null;
+                string Value() => Next() ?? throw new UsageError($"{a} needs a value after it.");
+                double Number() => ReadNumber(a, Next());
                 switch (a)
                 {
-                    case "-o": case "--out": output = Next(); break;
-                    case "--out-dir": outDir = Next(); break;
-                    case "--format": format = (Next() ?? "gpx").ToLowerInvariant(); break;
+                    case "-o": case "--out": output = Value(); break;
+                    case "--out-dir": outDir = Value(); break;
+                    case "--format": format = Value().ToLowerInvariant(); break;
                     case "--fit": format = "fit"; break;
                     case "--both": format = "both"; break;
                     case "--merge": merge = true; break;
                     case "--gps10": gps10 = true; break;
-                    case "--hz": hz = ParseD(Next()); break;
-                    case "--nudge": nudge = ParseD(Next()); break;
-                    case "--max-accuracy": maxAcc = ParseD(Next()); break;
-                    case "--date": dateStr = Next(); break;
-                    case "--leap": leap = (int?)ParseD(Next()); break;
+                    case "--hz": hz = Number(); break;
+                    case "--nudge": nudge = Number(); nudgeFromIni = false; break;
+                    case "--max-accuracy": maxAcc = Number(); break;
+                    case "--date": dateStr = Value(); break;
+                    case "--leap": leap = (int)Number(); break;
                     case "--trim": trim = true; break;
                     case "--no-imu-csv": writeImuCsv = false; break;
-                    case "--imu-hz": imuHz = ParseD(Next()) ?? 0; break;
+                    case "--imu-hz": imuHz = Number(); break;
                     case "--tilt":
                         // Optional value: "--tilt" or "--tilt auto" measures it, "--tilt 12.5" sets it.
+                        // Either way it wins over an angle from the settings file.
                         tilt = true;
+                        tiltDeg = null;
                         if (i + 1 < args.Length)
                         {
                             if (string.Equals(args[i + 1], "auto", StringComparison.OrdinalIgnoreCase)) i++;
@@ -121,19 +146,21 @@ internal static class Cli
                         }
                         break;
                     case "--detect-tilt": detectTilt = true; break;
-                    case "--xrk-dll": XrkReader.SetLibraryFolder(Next()); break;
+                    case "--xrk-dll": XrkReader.SetLibraryFolder(Value()); break;
                     case "--no-xrk": noXrk = true; break;
                     case "--verify-xrk": verifyXrk = true; break;
-                    case "--to-rate": toRate = ParseD(Next()) ?? 50; break;
+                    case "--to-rate": toRate = Number(); break;
                     case "--to-invert-steering": toInvertSteering = true; break;
                     case "--no-to-invert-steering": toInvertSteering = false; break;
                     case "--to-invert-lateral": toInvertLateral = true; break;
                     case "--no-to-invert-lateral": toInvertLateral = false; break;
-                    case "--ini": Next(); break;      // already read, before this loop
+                    case "--ini": Value(); break;      // already read, before this loop
                     case "--no-ini": break;
                     case "--nogui": break;
                     default:
-                        if (a.Length > 0 && a[0] != '-') inputs.Add(a);
+                        // A mistyped option used to vanish here, and the run went ahead without it.
+                        if (a.Length > 0 && a[0] == '-') throw new UsageError($"unknown option '{a}' (--help lists them).");
+                        if (a.Length > 0) inputs.Add(a);
                         break;
                 }
             }
@@ -177,6 +204,7 @@ internal static class Cli
                 // is the MyChron frame, so it does not apply to camera telemetry.
                 if (formats.HasFlag(Outputs.TelemetryOverlay))
                     Console.WriteLine("Note: the Telemetry Overlay CSV is a MyChron export; skipping it for Insta360 input.");
+                if (opt.ManualOffsetSeconds != 0) Console.WriteLine(Insta360NudgeNote(opt.ManualOffsetSeconds));
                 return RunInsta360(clips, output, outDir, formats, writeImuCsv, imuHz, merge, tiltPlan);
             }
 
@@ -188,6 +216,7 @@ internal static class Cli
             Console.WriteLine($"Found {sources.Count} session(s):");
             foreach (var s in sources) Console.WriteLine("  " + s.Describe());
             if (writeImuCsv && sources.Any(s => s.FromVbo)) Console.WriteLine(VboReader.NoImuNote);
+            Console.WriteLine($"Time nudge: {opt.DescribeNudge()}{(nudgeFromIni ? " (from the settings file)" : "")}");
             if (outDir is not null) Directory.CreateDirectory(outDir);
 
             if (merge && sources.Count > 1)
@@ -220,7 +249,7 @@ internal static class Cli
                                                   toRate, toInvertSteering, toInvertLateral);
                         // A session with no clock cannot be placed on the merged timeline.
                         if (TrackBuilder.SessionStartUtc(src.Gps, opt) is not DateTime su) continue;
-                        foreach (var x in im) x.Utc = su.AddSeconds(x.ElapsedS);
+                        foreach (var x in im) x.Utc = su.PlusSeconds(x.ElapsedS);
                         all.AddRange(im);
                     }
                 all.Sort((a, b) => (a.Utc ?? DateTime.MinValue).CompareTo(b.Utc ?? DateTime.MinValue));
@@ -259,12 +288,50 @@ internal static class Cli
             }
             return 0;
         }
+        catch (UsageError ex)
+        {
+            Console.Error.WriteLine("Error: " + ex.Message);
+            return 2;
+        }
         catch (Exception ex)
         {
             Console.Error.WriteLine("Error: " + ex.Message);
             return 1;
         }
     }
+
+    /// <summary>A command line that cannot be read as typed. Nothing is converted.</summary>
+    internal sealed class UsageError(string message) : Exception(message);
+
+    /// <summary>
+    /// An option's number. One that cannot be read stops the run: going on without it wrote files that
+    /// looked right and were not, as "--nudge abc" did, which left the track un-nudged.
+    /// </summary>
+    internal static double ReadNumber(string option, string? value) => ParseD(value) ?? throw new UsageError(
+        value is null ? $"{option} needs a number after it, such as {Example(option)}."
+                      : $"{option} needs a number, such as {Example(option)}, not '{value}'.");
+
+    private static string Example(string option) => option switch
+    {
+        "--nudge" => "-3.452",
+        "--max-accuracy" => "5",
+        "--leap" => "18",
+        "--hz" => "10 (0 keeps the native rate)",
+        "--imu-hz" => "50 (0 keeps the native rate)",
+        _ => "50",
+    };
+
+    /// <summary>
+    /// A command line word that is a value rather than an option: not empty, and not "--..." or "-x"
+    /// unless it is a number, so a negative nudge or tilt still counts as a value.
+    /// </summary>
+    private static bool IsValue(string word) =>
+        word.Length > 0 && !word.StartsWith("--", StringComparison.Ordinal) && (word[0] != '-' || ParseD(word) is not null);
+
+    /// <summary>The nudge is for logger sessions; a camera's own telemetry is written as recorded.</summary>
+    internal static string Insta360NudgeNote(double nudgeSeconds) =>
+        $"Note: the time nudge ({ConversionOptions.Seconds((long)Math.Round(nudgeSeconds * TimeSpan.TicksPerSecond))} s) " +
+        "applies to MyChron and .vbo sessions, not to Insta360 video, which is written as recorded.";
 
     /// <summary>Load a session's IMU, laps and temperature, all stamped to absolute UTC. A .vbo has none.</summary>
     private static FitWriter.Extras LoadMyChronExtras(MyChronSource src, ConversionOptions opt, double imuHz,
@@ -275,12 +342,12 @@ internal static class Cli
         tilt.ApplyTo(imu, Console.WriteLine);   // level before any downsample, so every output agrees
         if (imuHz > 0) imu = ImuCsvWriter.Downsample(imu, imuHz);
         if (startUtc is DateTime su)
-            foreach (var x in imu) x.Utc = su.AddSeconds(x.ElapsedS);
+            foreach (var x in imu) x.Utc = su.PlusSeconds(x.ElapsedS);
 
         var laps = new List<LapSplit>();
         if (startUtc is DateTime lapStart)
             foreach (var (number, start, duration) in src.LoadLaps())
-                laps.Add(new LapSplit { Number = number, StartUtc = lapStart.AddSeconds(start), DurationS = duration });
+                laps.Add(new LapSplit { Number = number, StartUtc = lapStart.PlusSeconds(start), DurationS = duration });
 
         return new FitWriter.Extras
         {
@@ -484,7 +551,7 @@ internal static class Cli
             if (tel.Gps.Count > 0)
             {
                 DateTime g0 = tel.Gps[0].Utc; // anchor the IMU to absolute UTC via the first fix
-                foreach (var s in tel.Imu) s.Utc = g0.AddSeconds(s.ElapsedS);
+                foreach (var s in tel.Imu) s.Utc = g0.PlusSeconds(s.ElapsedS);
             }
             slots[i] = (clips[i], tel, used);
         });
@@ -649,14 +716,18 @@ internal static class Cli
         Path.GetExtension(p).ToLowerInvariant() is ".gpx" or ".fit" ? Path.ChangeExtension(p, null) : p;
 
     /// <summary>
-    /// Accept both "12.5" and "12,5": the log prints dots, but a German keyboard types commas. Float
+    /// Accept both "12.5" and "12,5", whatever Windows' number format: the help and the README write
+    /// dots, but a German keyboard types commas. A comma with no dot is the decimal point, as none of
+    /// these numbers runs to thousands; before, "-3,452" was refused where Windows writes a dot. Float
     /// rather than Any is deliberate, because Any allows group separators and would read "20,0" as 200.
+    /// "NaN" and "Infinity" parse as doubles but are no setting, so they are refused.
     /// </summary>
     internal static double? ParseD(string? s)
     {
         const NumberStyles Style = NumberStyles.Float;
-        if (double.TryParse(s, Style, CultureInfo.InvariantCulture, out var v)) return v;
-        if (double.TryParse(s, Style, CultureInfo.CurrentCulture, out v)) return v;
+        string? t = s is not null && s.Contains(',') && !s.Contains('.') ? s.Replace(',', '.') : s;
+        if (double.TryParse(t, Style, CultureInfo.InvariantCulture, out var v)) return double.IsFinite(v) ? v : null;
+        if (double.TryParse(s, Style, CultureInfo.CurrentCulture, out v)) return double.IsFinite(v) ? v : null;
         return null;
     }
 
@@ -697,14 +768,17 @@ Options:
                             Default gpx. (--fit / --both are shortcuts.)
   --gps10                   Use _GPS.csv (10 Hz) instead of _GPS_o.csv (25 Hz). CSV exports only.
   --no-xrk                  Ignore .xrk/.xrz and use the RaceStudio CSV export instead.
-  --ini <file>              Read starting values from this settings file instead of the default
-                            (MyChron2Insta360.ini beside this program). Any option here wins over it.
+  --ini <file>              Read starting values from this settings file, which has to be there,
+                            instead of the default (MyChron2Insta360.ini beside this program). Any
+                            option here wins over it.
   --no-ini                  Ignore the settings file entirely.
   --verify-xrk              Read an .xrk with this tool, with AiM's library and from the CSV export,
                             report every difference, then exit. Writes nothing.
   --xrk-dll <folder>        Where AiM's library sits. Only --verify-xrk uses it.
-  --hz <n>                  Downsample to n Hz. Default: keep the native rate.
-  --nudge <seconds>         Add seconds to every timestamp (fine sync tuning).
+  --hz <n>                  Downsample to n Hz. Default, or 0: keep the native rate.
+  --nudge <seconds>         Add seconds to every timestamp (fine sync tuning), such as -3.452 or
+                            -3,452. MyChron and .vbo sessions only: Insta360 video is written as
+                            recorded. The log states the nudge applied.
   --max-accuracy <m>        Drop fixes with reported accuracy worse than m metres (default: keep all).
                             A .vbo reports no accuracy, so all of its fixes are kept.
   --date <YYYY-MM-DD>       Override the session date (only if it isn't in the folder path). For a
@@ -712,10 +786,11 @@ Options:
   --leap <n>                GPS-UTC leap seconds for iTOW (default {ItowTime.DefaultLeapSeconds}). A .vbo is UTC already.
   --trim                    Trim leading/trailing standstill per session (off by default).
   --no-imu-csv              Do not write the separate accel/gyro CSV (it is written by default).
-  --imu-hz <n>              Downsample the IMU to n Hz (default: native, ~1000 Hz on Insta360).
+  --imu-hz <n>              Downsample the IMU to n Hz. Default, or 0: native, ~1000 Hz on Insta360.
   --tilt [deg]              Correct the mount tilt: rotate the IMU so gravity sits on the vertical
                             axis. Without a value (or with 'auto') the angle is measured from the
-                            data; give a number to use a known angle instead.
+                            data; give a number to use a known angle instead. Either way it wins
+                            over the settings file's tilt.
   --detect-tilt             Only measure and print the mount tilt, then exit. Writes nothing.
 
  Telemetry Overlay CSV (--format telemetry-overlay), for MyChron and .vbo sessions:
@@ -725,6 +800,10 @@ Options:
   --to-invert-lateral       Negate lateral g (default: off, the 'seat of the pants' sense).
   -h, --help                Show this help.
   --version                 Show version.
+
+Numbers take a dot or a comma as the decimal point, whatever the Windows number format. An unknown
+option, a missing or unreadable value, or an --ini file that is not there stops with an error and
+converts nothing. Another option where a value should be counts as missing.
 
 Import the output in the Insta360 app: Dashboard -> Data Source -> Local Files -> Import.");
     }

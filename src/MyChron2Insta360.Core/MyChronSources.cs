@@ -221,7 +221,7 @@ public static class MyChronSources
     private static MyChronSource FromCsvFolder(string gpsCsv)
     {
         var session = RaceStudioGpsCsv.Parse(gpsCsv);
-        session.DateHint = RaceStudioGpsCsv.ExtractDateHint(gpsCsv);
+        RaceStudioGpsCsv.SetDateHint(session, gpsCsv);
         session.Name = RaceStudioGpsCsv.ExtractName(gpsCsv);
         string folder = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(gpsCsv))!;
         return new MyChronSource
@@ -259,7 +259,7 @@ public static class MyChronSources
         if (startUtc is not DateTime start) return list;
         var t = channels.FirstOrDefault(c => c.Name.Replace(" ", "").Equals("LoggerTemperature", StringComparison.OrdinalIgnoreCase));
         if (t is null) return list;
-        for (int i = 0; i < t.Values.Count; i++) list.Add((start.AddSeconds(t.Times[i]), t.Values[i]));
+        for (int i = 0; i < t.Values.Count; i++) list.Add((start.PlusSeconds(t.Times[i]), t.Values[i]));
         return list;
     }
 }

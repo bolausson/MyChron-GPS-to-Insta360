@@ -22,7 +22,7 @@ public static class RaceStudioChannels
         var laps = new List<LapSplit>();
         if (sessionStartUtc is not DateTime start) return laps;
         foreach (var (number, startS, durationS) in LoadLapsElapsed(folder))
-            laps.Add(new LapSplit { Number = number, StartUtc = start.AddSeconds(startS), DurationS = durationS });
+            laps.Add(new LapSplit { Number = number, StartUtc = start.PlusSeconds(startS), DurationS = durationS });
         return laps;
     }
 
@@ -63,7 +63,7 @@ public static class RaceStudioChannels
             if (c <= 0) continue;
             if (!double.TryParse(line.AsSpan(0, c), NumberStyles.Any, CultureInfo.InvariantCulture, out double t)) continue;
             if (!double.TryParse(line.AsSpan(c + 1).Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out double v)) continue;
-            list.Add((start.AddSeconds(t), v));
+            list.Add((start.PlusSeconds(t), v));
         }
         return list;
     }

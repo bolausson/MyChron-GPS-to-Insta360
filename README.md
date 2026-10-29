@@ -86,7 +86,9 @@ single "AiM CSV" export: it resamples everything to one rate and has no true GPS
 
 Two things to know if you use this path. The export **rounds** (accelerations to 2 decimals, gyro,
 steering, battery and temperature to 1), so it is less precise than the logger file. And it has no GPS
-week number, so the session date is taken from the folder path, or from `--date`.
+week number, so the session date is taken from the folder path, RaceStudio's `data\YYYY-MM-DD\...`, or
+from `--date`. Outside such a folder it comes from when the export was written, which is right as long
+as that was less than a week after the session ended; otherwise give `--date`.
 
 ## Reading an Insta360 video
 
@@ -241,9 +243,10 @@ always-open-sources-dir = false
 ```
 
 **The command line reads it too**, which makes scripting shorter: put the common options in a file and
-pass only what changes. Any option you type still wins over the file. `--ini <file>` picks a different
-one and `--no-ini` ignores it entirely, so a script can guarantee it is unaffected. With no file
-present nothing changes at all.
+pass only what changes. Any option you type still wins over the file. A line in it that cannot be
+read, `nudge = abc` or a misspelled key say, is named in the log and ignored. `--ini <file>` picks a
+different one, which has to be there, and `--no-ini` ignores it entirely, so a script can guarantee it
+is unaffected. With no file present nothing changes at all.
 
 ## Mount tilt correction
 
@@ -280,6 +283,12 @@ Insta360 syncs telemetry to video **by absolute timestamp**. The `itow` column i
 tool derives **exact UTC to the millisecond**. There is no timezone to configure and no guessing (the
 calendar date is read from the RaceStudio folder path). A `--nudge` / *Time nudge* control remains for
 trimming any residual camera-clock offset.
+
+The nudge is in seconds, to the millisecond: `-3.452` or `-3,452`, negative to move every timestamp
+earlier, positive for later. The GUI box and `--nudge` both read a dot or a comma, whatever the Windows
+number format. The box shows three decimals, and what it shows is exactly what is applied. The log
+states the nudge used. It applies to MyChron and `.vbo` sessions; Insta360 video is written as
+recorded, and the log says so if a nudge is set.
 
 ## Multiple sessions
 
@@ -373,21 +382,26 @@ MyChron2Insta360 --help
 | `--gps10` | Use `_GPS.csv` (10 Hz) instead of `_GPS_o.csv` (25 Hz). CSV exports only |
 | `--no-xrk` | Ignore `.xrk`/`.xrz` and use the RaceStudio CSV export instead |
 | `--verify-xrk` | Read an `.xrk` with this tool, AiM's library and the CSV export, and report differences |
-| `--ini <file>` | Read starting values from this settings file instead of the default |
+| `--ini <file>` | Read starting values from this settings file instead of the default. It has to be there |
 | `--no-ini` | Ignore the settings file entirely |
 | `--xrk-dll <folder>` | Where AiM's library sits, used only by `--verify-xrk` |
-| `--hz <n>` | Downsample to n Hz (default: native rate) |
-| `--nudge <seconds>` | Shift every timestamp to fine-tune sync |
+| `--hz <n>` | Downsample to n Hz (default, or 0: native rate) |
+| `--nudge <seconds>` | Shift every timestamp to fine-tune sync, such as `-3.452`. MyChron and `.vbo` sessions only |
 | `--max-accuracy <m>` | Drop fixes with reported accuracy worse than m metres (default: keep all). A `.vbo` reports none, so all its fixes are kept |
 | `--date <YYYY-MM-DD>` | Override the session date (only if it isn't in the folder path). For a `.vbo`, the UTC date of its first fix, used when its header gives none |
 | `--leap <n>` | GPS-UTC leap seconds for iTOW (default 18). Not used for a `.vbo`, which is UTC already |
 | `--trim` | Trim leading/trailing standstill per session (off by default) |
 | `--no-imu-csv` | Do not write the separate accel/gyro CSV (it is written by default) |
-| `--imu-hz <n>` | Downsample the IMU to n Hz (default: native, about 1000 Hz on Insta360) |
-| `--tilt [deg]` | Correct the mount tilt. No value (or `auto`) measures it; a number uses that angle |
+| `--imu-hz <n>` | Downsample the IMU to n Hz (default, or 0: native, about 1000 Hz on Insta360) |
+| `--tilt [deg]` | Correct the mount tilt. No value (or `auto`) measures it; a number uses that angle. Either wins over the settings file |
 | `--detect-tilt` | Only measure and print the mount tilt, then exit. Writes nothing |
 | `-h, --help` | Show the built-in help |
 | `--version` | Show the version |
+
+An unknown option, a value that is missing or cannot be read, or an `--ini` file that is not there
+stops with an error and converts nothing, rather than going ahead without it. Another option where a
+value belongs counts as a missing value: `--out-dir --merge` is an error, not a folder called
+`--merge`.
 
 Then in the Insta360 app: **Dashboard, Data Source, Local Files, Import**.
 
@@ -402,7 +416,8 @@ src/
                            RaceStudioChannelScan (discovers whatever channels a session has),
                            Insta360Trailer (native .insv/.lrv metadata reader),
                            VboReader (Dragy and other .vbo GPS logs),
-                           ItowTime (GPS to UTC), Conversion (build/downsample),
+                           ItowTime (GPS to UTC), Clock (time sums exact to the tick),
+                           Conversion (build/downsample),
                            TiltCorrection (mount tilt), Imu (shared sample type),
                            GpxWriter, FitWriter, ImuCsvWriter,
                            TelemetryOverlayCsv + TelemetryOverlayAliases (merged AiM CSV)
@@ -420,6 +435,44 @@ publicly documented format, with no external tool required; the layout was cross
 and the output verified against ExifTool on real files.
 
 ## Changes
+
+### 1.4.1
+
+- **The time nudge in the GUI** shows milliseconds, `-3,452` rather than `-3,5`, and reads a dot or a
+  comma as the decimal point. Under a German number format, `-3.452` used to read as minus three
+  thousand four hundred fifty-two and land on the -600 s limit; and `-3,452` showed as `-3,5` while
+  -3.452 s was applied. What the box shows is now what is applied. The Max GPS accuracy box reads
+  either mark too, and the whole-number boxes keep only what they show. Every number on the command
+  line and in the settings file reads either mark as well, whatever the Windows number format.
+- **The log states the time nudge applied**, on the command line too, and says so when it came from the
+  settings file. For Insta360 video, which is never nudged, it says that instead.
+- **The command line stops on what it cannot read**: a value such as `--nudge abc`, an option with its
+  value missing or another option in its place (`--out-dir --merge` made a folder called `--merge`),
+  a mistyped option such as `--nuge`, or an `--ini` file that is not there. Each was skipped without a
+  word before, and the files were written without it. A settings file line that cannot be read, a
+  bad value or a misspelled key, is now named in the log, and `--ini` follows a pointer file.
+- Fixed: `--tilt` and `--tilt auto` measure the angle as the help says, even when the settings file
+  holds one; the file's angle was used instead. `tilt = on`, `yes` or `true` in the settings file
+  means measure it.
+- Fixed: **about every other GPS fix was written 1 ms early**, `.199` for `.200`. The receiver's own
+  times are exact, on a 40 ms grid at 25 Hz, but adding milliseconds to a count of seconds since 1980
+  lost the last digit. Every fix now carries its exact time, so the steps between fixes are an even
+  40 ms rather than 39 and 41, which matters wherever speed is worked out from position and time. This
+  affects every MyChron GPX and FIT made so far.
+- Fixed: the IMU, laps and temperature were stamped up to 1 ms early: depending on the session, none,
+  about half or all the rows of its IMU CSV. A positive time nudge could come out 1 ms short too.
+- Fixed: a RaceStudio CSV export, or any session converted with `--date`, recorded close to midnight
+  UTC between Saturday and Sunday could come out a whole week off, so the dashboard found nothing to
+  sync: a Saturday evening session in the Americas, a Sunday morning one in Asia or Australia, the
+  first hour or two of a Sunday in Europe. The date fell in the GPS week before or after the session's
+  own.
+- Fixed: a CSV export outside RaceStudio's dated folders, which is dated by when it was written, came
+  out a week late when written in the GPS week after the session's, the Bigulia export 6 days 23 hours
+  on for one. It is now right whenever it was written less than a week after the session ended.
+- Fixed: a session running through the change of GPS week itself, at 23:59:42 UTC on a Saturday (late
+  Saturday afternoon in California), failed to convert from an `.xrk` with "Nullable object must have
+  a value", and from a CSV export put everything after that moment a week early, with one point a day
+  off.
 
 ### 1.4.0
 

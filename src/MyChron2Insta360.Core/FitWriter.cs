@@ -93,7 +93,7 @@ public static class FitWriter
                 var lm = new LapMesg();
                 lm.SetMessageIndex((ushort)lapCount);
                 lm.SetStartTime(new Dynastream.Fit.DateTime(Utc(l.StartUtc)));
-                lm.SetTimestamp(new Dynastream.Fit.DateTime(Utc(l.StartUtc.AddSeconds(l.DurationS))));
+                lm.SetTimestamp(new Dynastream.Fit.DateTime(Utc(l.StartUtc.PlusSeconds(l.DurationS))));
                 lm.SetTotalElapsedTime((float)l.DurationS);
                 lm.SetTotalTimerTime((float)l.DurationS);
                 lm.SetEvent(Event.Lap);
@@ -155,7 +155,7 @@ public static class FitWriter
     /// </summary>
     private static void WriteImu(Encode encoder, IReadOnlyList<ImuSample> imu, System.DateTime fallbackStart)
     {
-        System.DateTime At(ImuSample s) => Utc(s.Utc ?? fallbackStart.AddSeconds(s.ElapsedS));
+        System.DateTime At(ImuSample s) => Utc(s.Utc ?? fallbackStart.PlusSeconds(s.ElapsedS));
         for (int i = 0, n; i < imu.Count; i += n)
         {
             System.DateTime t0 = At(imu[i]);
@@ -176,7 +176,7 @@ public static class FitWriter
             for (int k = 0; k < n; k++)
             {
                 var s = imu[i + k];
-                System.DateTime tk = Utc(s.Utc ?? fallbackStart.AddSeconds(s.ElapsedS));
+                System.DateTime tk = Utc(s.Utc ?? fallbackStart.PlusSeconds(s.ElapsedS));
                 ushort off = (ushort)System.Math.Clamp((tk - t0).TotalMilliseconds, 0, 65535);
 
                 a.SetSampleTimeOffset(k, off);

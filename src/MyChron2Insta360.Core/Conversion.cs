@@ -3,7 +3,7 @@ namespace MyChron2Insta360.Core;
 /// <summary>User-tunable options for turning GPS session(s) into an output track.</summary>
 public sealed class ConversionOptions
 {
-    /// <summary>Seconds added to every timestamp, fine-tunes sync against the camera clock.</summary>
+    /// <summary>Seconds added to every timestamp, fine-tunes sync against the camera clock. Insta360 video is never nudged.</summary>
     public double ManualOffsetSeconds { get; set; }
 
     /// <summary>Target output rate. 0 = keep the file's native rate (no downsampling).</summary>
@@ -49,6 +49,19 @@ public sealed class ConversionOptions
         (false, true) => "the UTC stated in the .vbo",
         _ => "relative (no GPS time), sync will need a nudge",
     };
+
+    /// <summary>The time nudge as the log states it: signed, and exactly as applied, to the 100 ns tick.</summary>
+    public string DescribeNudge()
+    {
+        long ticks = (long)Math.Round(ManualOffsetSeconds * TimeSpan.TicksPerSecond);   // as Clock.PlusSeconds adds it
+        if (ticks == 0) return "none";
+        return $"{Seconds(ticks)} s, every timestamp moved {Seconds(Math.Abs(ticks)).TrimStart('+')} s " +
+               (ticks < 0 ? "earlier" : "later");
+    }
+
+    /// <summary>Signed seconds for the log, every digit a tick carries and no more.</summary>
+    public static string Seconds(long ticks) =>
+        (ticks / (double)TimeSpan.TicksPerSecond).ToString("+0.#######;-0.#######", System.Globalization.CultureInfo.CurrentCulture);
 }
 
 /// <summary>One output track point with an absolute UTC timestamp.</summary>
@@ -84,6 +97,10 @@ public static class TrackBuilder
             // An xrk carries the GPS week itself, so no calendar hint is needed to place the iTOW.
             int? week = opt.DateOverrideUtc is null ? session.GpsWeek : null;
             DateTime? dateHint = opt.DateOverrideUtc ?? session.DateHint;
+            // The first fix places the session, and every other fix goes in the GPS week nearest it, so
+            // a session is never split, and runs on past the change of week, Saturday to Sunday at
+            // midnight GPS time, where iTOW starts again from 0 while an xrk's week stays.
+            DateTime? anchor = FirstFixUtc(session, opt, out _);
             var usable = session.Samples.Where(s => Usable(s, opt)).ToList();
             // A session without a single fix (the GPS never locked) has nothing to place, so it is not an error.
             if (usable.Count > 0 && fileUtc is null && week is null && dateHint is null)
@@ -94,14 +111,13 @@ public static class TrackBuilder
             var pts = new List<TrackPoint>(usable.Count);
             foreach (var s in Thinning.ToRate(usable, s => s.TimeRel, opt.TargetHz))
             {
-                // Rounded to the tick: AddSeconds truncates, and TimeRel is often a hair under its value,
-                // which put every other point of a .vbo a millisecond early.
-                DateTime utc = fileUtc is DateTime f0 ? f0.AddTicks((long)Math.Round(s.TimeRel * TimeSpan.TicksPerSecond))
-                    : haveItow && !double.IsNaN(s.ItowMs) && s.ItowMs > 0
-                        ? (week is int w ? ItowTime.FromWeek(w, s.ItowMs, opt.LeapSeconds)
-                                         : ItowTime.ToUtc(s.ItowMs, dateHint!.Value, opt.LeapSeconds))
-                        : dateHint!.Value.Date.AddSeconds(s.TimeRel); // degraded fallback
-                utc = DateTime.SpecifyKind(utc, DateTimeKind.Utc).AddSeconds(opt.ManualOffsetSeconds);
+                // iTOW 0 is the first instant of a GPS week, a real time: it fell back to the date before,
+                // which failed an xrk with a fix on the stroke of the week and threw a CSV one's a day off.
+                DateTime utc = fileUtc is DateTime f0 ? f0.PlusSeconds(s.TimeRel)
+                    : haveItow && !double.IsNaN(s.ItowMs) && s.ItowMs >= 0
+                        ? ItowTime.ToUtc(s.ItowMs, anchor!.Value, opt.LeapSeconds)
+                        : dateHint!.Value.Date.PlusSeconds(s.TimeRel); // degraded fallback
+                utc = DateTime.SpecifyKind(utc, DateTimeKind.Utc).PlusSeconds(opt.ManualOffsetSeconds);
 
                 pts.Add(new TrackPoint
                 {
@@ -156,18 +172,31 @@ public static class TrackBuilder
         DateTime? start = session.StartUtc;
         if (start is null)
         {
-            // An xrk carries the GPS week, which fixes the instant without any calendar hint.
-            int? week = opt.DateOverrideUtc is null ? session.GpsWeek : null;
-            DateTime? dateHint = opt.DateOverrideUtc ?? session.DateHint;
-            var first = session.Samples.FirstOrDefault(g => !double.IsNaN(g.ItowMs) && g.ItowMs > 0);
-            if (first is not null && (week is not null || dateHint is not null))
-                start = (week is int w ? ItowTime.FromWeek(w, first.ItowMs, opt.LeapSeconds)
-                                       : ItowTime.ToUtc(first.ItowMs, dateHint!.Value, opt.LeapSeconds))
-                        .AddSeconds(-first.TimeRel);
-            else if (first is null && dateHint is DateTime d)
+            if (FirstFixUtc(session, opt, out var first) is DateTime f) start = f.PlusSeconds(-first!.TimeRel);
+            else if (first is null && (opt.DateOverrideUtc ?? session.DateHint) is DateTime d)
                 start = d.Date;   // the same degraded clock the track falls back to
         }
-        return start is DateTime u ? DateTime.SpecifyKind(u, DateTimeKind.Utc).AddSeconds(opt.ManualOffsetSeconds) : null;
+        return start is DateTime u ? DateTime.SpecifyKind(u, DateTimeKind.Utc).PlusSeconds(opt.ManualOffsetSeconds) : null;
+    }
+
+    /// <summary>
+    /// UTC of a session's first fix with GPS time, which places the whole session. An xrk states its
+    /// GPS week. Otherwise a date picks it: a folder date or --date is the day of the session, so the
+    /// week nearest it; a file's write time comes after the session, days after at times, so its last
+    /// fix goes in the last week that does not put it after that, and the first fix in the week nearest
+    /// the last. Taking the week nearest a write time put an export written four days on a week late,
+    /// and could split a session across two weeks.
+    /// </summary>
+    private static DateTime? FirstFixUtc(GpsSession session, ConversionOptions opt, out GpsSample? first)
+    {
+        first = session.Samples.FirstOrDefault(g => !double.IsNaN(g.ItowMs) && g.ItowMs > 0);
+        if (first is null) return null;
+        if (opt.DateOverrideUtc is DateTime forced) return ItowTime.ToUtc(first.ItowMs, forced, opt.LeapSeconds);
+        if (session.GpsWeek is int w) return ItowTime.FromWeek(w, first.ItowMs, opt.LeapSeconds);
+        if (session.DateHint is not DateTime hint) return null;
+        if (!session.DateHintIsFileTime) return ItowTime.ToUtc(first.ItowMs, hint, opt.LeapSeconds);
+        var last = session.Samples.Last(g => !double.IsNaN(g.ItowMs) && g.ItowMs > 0);
+        return ItowTime.ToUtc(first.ItowMs, ItowTime.ToUtcNotAfter(last.ItowMs, hint, opt.LeapSeconds), opt.LeapSeconds);
     }
 
     /// <summary>A fix with a real position: not missing, not the 0,0 a receiver reports before it locks.</summary>
