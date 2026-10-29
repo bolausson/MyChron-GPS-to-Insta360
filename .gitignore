@@ -15,3 +15,7 @@ publish/
 
 # Saved GUI settings (written by "Save as default")
 *.ini
+
+# Local copies of real input files for testing: MyChron logs and exports, and a friend's Dragy log.
+# Never committed; sample-sources/README.md says what each one is.
+/sample-sources/
